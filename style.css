@@ -1,0 +1,934 @@
+/* === ОБЩИЕ СТИЛИ === */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #0a0a0a;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+/* === СТРАНИЦА ВХОДА === */
+.login-page {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: radial-gradient(ellipse at center, #1a0a0a 0%, #000000 100%);
+}
+
+.login-container {
+    width: 100%;
+    max-width: 420px;
+    padding: 20px;
+}
+
+.login-card {
+    background: #111111;
+    border: 2px solid #c9a84c;
+    border-radius: 12px;
+    padding: 40px 30px;
+    box-shadow: 0 0 30px rgba(201, 168, 76, 0.15), 0 0 60px rgba(180, 0, 0, 0.1);
+}
+
+.login-header {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.login-header h1 {
+    color: #c9a84c;
+    font-size: 32px;
+    letter-spacing: 4px;
+    margin-bottom: 5px;
+}
+
+.login-header p {
+    color: #888;
+    font-size: 14px;
+}
+
+.error-message {
+    background: #2d0000;
+    border: 1px solid #cc0000;
+    color: #ff4444;
+    padding: 10px 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.success-message {
+    background: #002d00;
+    border: 1px solid #00cc00;
+    color: #44ff44;
+    padding: 10px 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    color: #c9a84c;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 12px 15px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 16px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: #c9a84c;
+    box-shadow: 0 0 10px rgba(201, 168, 76, 0.2);
+}
+
+.form-group input::placeholder {
+    color: #555;
+}
+
+.login-btn {
+    width: 100%;
+    padding: 14px;
+    background: linear-gradient(180deg, #cc0000, #990000);
+    color: #fff;
+    border: 1px solid #ff3333;
+    border-radius: 5px;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: all 0.3s;
+    margin-top: 10px;
+}
+
+.login-btn:hover {
+    background: linear-gradient(180deg, #e60000, #b30000);
+    box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);
+}
+
+/* === ОСНОВНАЯ СТРАНИЦА === */
+.files-page,
+.admin-page {
+    padding: 20px;
+}
+
+.container {
+    max-width: 850px;
+    margin: 0 auto;
+    background: #111111;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 30px;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 25px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #c9a84c;
+    gap: 10px;
+}
+
+.header h1 {
+    color: #c9a84c;
+    font-size: 24px;
+}
+
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.user-name {
+    color: #ccc;
+}
+
+.user-tags {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.tag-badge {
+    background: #1a1a1a;
+    border: 1px solid #c9a84c;
+    color: #c9a84c;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.admin-btn {
+    color: #c9a84c;
+    text-decoration: none;
+    border: 1px solid #c9a84c;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    transition: all 0.3s;
+}
+
+.admin-btn:hover {
+    background: #1a1a00;
+}
+
+.back-btn {
+    color: #c9a84c;
+    text-decoration: none;
+    font-size: 14px;
+    transition: color 0.3s;
+}
+
+.back-btn:hover {
+    color: #fff;
+}
+
+.logout-btn {
+    color: #ff6666;
+    text-decoration: none;
+    border: 1px solid #ff3333;
+    padding: 6px 15px;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: all 0.3s;
+}
+
+.logout-btn:hover {
+    background: #330000;
+    color: #ff9999;
+}
+
+/* === ФОРМА ЗАГРУЗКИ === */
+.upload-section {
+    margin-bottom: 30px;
+}
+
+.upload-section h2 {
+    color: #c9a84c;
+    margin-bottom: 15px;
+}
+
+.upload-form-full {
+    background: #1a1a1a;
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid #333;
+}
+
+.upload-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.upload-row input[type="file"] {
+    flex-grow: 1;
+    padding: 12px;
+    background: #0d0d0d;
+    border: 2px dashed #444;
+    border-radius: 5px;
+    color: #ccc;
+    cursor: pointer;
+}
+
+.upload-row input[type="file"]:hover {
+    border-color: #c9a84c;
+}
+
+.upload-btn {
+    padding: 12px 25px;
+    background: linear-gradient(180deg, #cc0000, #990000);
+    color: white;
+    border: 1px solid #ff3333;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 15px;
+    white-space: nowrap;
+    transition: all 0.3s;
+}
+
+.upload-btn:hover {
+    box-shadow: 0 0 15px rgba(255, 0, 0, 0.4);
+}
+
+.access-controls {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.access-block {
+    flex: 1;
+    min-width: 230px;
+}
+
+.access-block h3 {
+    color: #999;
+    font-size: 14px;
+    margin-bottom: 8px;
+}
+
+.tags-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tag-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 4px 10px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 15px;
+    font-size: 12px;
+    transition: all 0.2s;
+}
+
+.tag-checkbox:hover {
+    border-color: #c9a84c;
+}
+
+.tag-checkbox input:checked+span {
+    color: #c9a84c;
+}
+
+.logins-input {
+    width: 100%;
+    padding: 8px 12px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 14px;
+}
+
+.logins-input:focus {
+    outline: none;
+    border-color: #c9a84c;
+}
+
+.access-block small {
+    color: #666;
+    font-size: 11px;
+}
+
+/* === СПИСОК ФАЙЛОВ === */
+.files-section h2 {
+    color: #c9a84c;
+    margin-bottom: 15px;
+}
+
+.day-header {
+    color: #c9a84c;
+    font-weight: bold;
+    font-size: 14px;
+    padding: 8px 0;
+    border-bottom: 1px solid #c9a84c;
+}
+
+.day-separator {
+    text-align: center;
+    margin: 15px 0;
+    position: relative;
+}
+
+.day-separator::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #c9a84c, transparent);
+}
+
+.day-separator span {
+    background: #111;
+    padding: 0 15px;
+    color: #c9a84c;
+    font-size: 13px;
+    position: relative;
+}
+
+.file-list {
+    list-style: none;
+}
+
+.file-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 8px;
+    border-bottom: 1px solid #1a1a1a;
+    gap: 10px;
+    transition: background 0.2s;
+}
+
+.file-list li:hover {
+    background: #1a1a1a;
+}
+
+.file-info {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.file-name {
+    word-break: break-all;
+}
+
+.file-meta {
+    font-size: 12px;
+    color: #888;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.file-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.tag-mini {
+    background: #1a1a00;
+    border: 1px solid #c9a84c;
+    color: #c9a84c;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+}
+
+.download-btn {
+    text-decoration: none;
+    color: #000;
+    background: linear-gradient(180deg, #c9a84c, #a88a3a);
+    padding: 6px 18px;
+    border-radius: 5px;
+    font-size: 13px;
+    font-weight: bold;
+    white-space: nowrap;
+    transition: all 0.3s;
+}
+
+.download-btn:hover {
+    background: linear-gradient(180deg, #dbb95a, #b89640);
+    box-shadow: 0 0 10px rgba(201, 168, 76, 0.4);
+}
+
+.empty {
+    text-align: center;
+    color: #666;
+    font-style: italic;
+    padding: 30px;
+}
+
+/* === АДМИН-ПАНЕЛЬ === */
+.user-edit-card {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 15px;
+}
+
+.user-edit-card h3 {
+    color: #c9a84c;
+    margin-bottom: 10px;
+}
+
+.edit-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.edit-row label {
+    color: #999;
+    min-width: 60px;
+    padding-top: 8px;
+}
+
+.edit-row input[type="text"] {
+    padding: 8px 12px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 14px;
+    flex-grow: 1;
+}
+
+.edit-row input[type="text"]:focus {
+    outline: none;
+    border-color: #c9a84c;
+}
+
+.admin-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.admin-tags label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 4px 10px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 15px;
+    font-size: 12px;
+    color: #ccc;
+    transition: all 0.2s;
+}
+
+.admin-tags label:hover {
+    border-color: #c9a84c;
+}
+
+.save-btn {
+    width: 100%;
+    padding: 14px;
+    background: linear-gradient(180deg, #c9a84c, #a88a3a);
+    color: #000;
+    border: none;
+    border-radius: 5px;
+    font-size: 18px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.save-btn:hover {
+    background: linear-gradient(180deg, #dbb95a, #b89640);
+    box-shadow: 0 0 20px rgba(201, 168, 76, 0.4);
+}
+
+.pinned-section {
+    margin-bottom: 20px;
+}
+
+.pinned-section h3 {
+    color: #ffd700;
+    font-size: 15px;
+    margin-bottom: 10px;
+}
+
+.pinned-list .pinned-item {
+    background: #1a1400;
+    border: 1px solid #c9a84c;
+    border-radius: 6px;
+    margin-bottom: 5px;
+    padding: 10px 12px;
+}
+
+.pin-icon {
+    margin-right: 8px;
+    font-size: 16px;
+}
+
+/* === КНОПКИ ДЕЙСТВИЙ === */
+.file-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.pin-btn {
+    text-decoration: none;
+    font-size: 18px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    transition: all 0.2s;
+    opacity: 0.5;
+}
+
+.pin-btn:hover {
+    opacity: 1;
+    background: #1a1a00;
+}
+
+.delete-btn {
+    text-decoration: none;
+    color: #ff4444;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 2px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.delete-btn:hover {
+    background: #2d0000;
+    border-color: #cc0000;
+}
+
+.file-date {
+    color: #666;
+    font-size: 11px;
+    margin-left: 5px;
+}
+
+/* === ПРОГРЕСС-БАР === */
+.progress-container {
+    margin: 12px 0;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 8px;
+    height: 28px;
+    position: relative;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #990000, #cc0000, #ff3333);
+    width: 0%;
+    border-radius: 8px;
+    transition: width 0.3s ease;
+    box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.1);
+    position: relative;
+}
+
+/* Анимация пульсации при загрузке */
+.progress-bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.1) 50%,
+            transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.progress-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #fff;
+    font-size: 13px;
+    font-weight: bold;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    white-space: nowrap;
+}
+
+.file-input-wrapper {
+    flex-grow: 1;
+}
+
+.file-input-wrapper input[type="file"] {
+    width: 100%;
+    padding: 12px;
+    background: #0d0d0d;
+    border: 2px dashed #444;
+    border-radius: 5px;
+    color: #ccc;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+
+.file-input-wrapper input[type="file"]:hover {
+    border-color: #c9a84c;
+}
+
+
+/* === АДМИН-ПАНЕЛЬ (новые стили) === */
+
+.admin-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+@media (max-width: 768px) {
+    .admin-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.admin-block {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.admin-block h2 {
+    color: #c9a84c;
+    font-size: 16px;
+    margin-top: 0;
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #333;
+}
+
+.admin-column {
+    display: flex;
+    flex-direction: column;
+}
+
+.inline-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.form-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.form-row input[type="text"],
+.form-row input[type="password"] {
+    flex: 1;
+    min-width: 120px;
+    padding: 10px 12px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 14px;
+}
+
+.form-row input:focus {
+    outline: none;
+    border-color: #c9a84c;
+}
+
+.action-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s;
+    white-space: nowrap;
+}
+
+.green-btn {
+    background: #27ae60;
+    color: #fff;
+}
+
+.green-btn:hover {
+    background: #2ecc71;
+    box-shadow: 0 0 15px rgba(46, 204, 113, 0.3);
+}
+
+.gold-btn {
+    background: linear-gradient(180deg, #c9a84c, #a88a3a);
+    color: #000;
+}
+
+.gold-btn:hover {
+    box-shadow: 0 0 15px rgba(201, 168, 76, 0.4);
+}
+
+/* Список тегов */
+.tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.tag-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #111;
+    border: 1px solid #444;
+    padding: 6px 12px;
+    border-radius: 15px;
+    font-size: 13px;
+    color: #ccc;
+}
+
+.tag-delete {
+    color: #ff4444;
+    text-decoration: none;
+    font-weight: bold;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.tag-delete:hover {
+    color: #ff0000;
+}
+
+/* Карточка пользователя */
+.admin-mark {
+    color: #c9a84c;
+    font-size: 12px;
+    font-weight: normal;
+}
+
+.delete-user-btn {
+    color: #ff4444;
+    text-decoration: none;
+    font-size: 12px;
+    border: 1px solid #ff4444;
+    padding: 4px 10px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.delete-user-btn:hover {
+    background: #330000;
+    color: #ff6666;
+}
+
+/* Адаптация user-edit-card под колонку */
+.user-edit-card {
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 12px;
+}
+
+.user-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.user-card-header h3 {
+    color: #c9a84c;
+    margin: 0;
+    font-size: 16px;
+}
+
+.admin-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.admin-tags label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 5px 12px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 15px;
+    font-size: 12px;
+    color: #ccc;
+    transition: all 0.2s;
+}
+
+.admin-tags label:hover {
+    border-color: #c9a84c;
+}
+
+.admin-tags label:has(input:checked) {
+    color: #c9a84c;
+    border-color: #c9a84c;
+    background: #1a1a00;
+}
+
+/* === КНОПКА КОПИРОВАНИЯ ССЫЛКИ === */
+.copy-link-btn {
+    background: none;
+    border: 1px solid #666;
+    color: #ccc;
+    font-size: 16px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.copy-link-btn:hover {
+    background: #1a1a1a;
+    border-color: #c9a84c;
+    color: #c9a84c;
+}
+
+/* === УВЕДОМЛЕНИЕ (TOAST) === */
+.toast {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: #c9a84c;
+    color: #000;
+    padding: 12px 25px;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 14px;
+    z-index: 9999;
+    opacity: 0;
+    transition: all 0.3s ease;
+    pointer-events: none;
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
