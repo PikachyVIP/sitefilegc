@@ -10,6 +10,7 @@ if (!isset($_SESSION['user'])) {
 $user = $_SESSION['user'];
 $user_id = $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
+$admin_rights = $_SESSION['admin_rights'] ?? [];
 $all_tags = ['Глава GC', 'Команда GC', 'Програмист GC', 'Художник GC', 'Билдер GC', 'Игрок', 'Доверенный'];
 $upload_dir = 'uploads/';
 
@@ -65,8 +66,9 @@ $stmt = $pdo->query('SELECT login FROM users ORDER BY login');
 $all_users = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
 // Проверки прав для кнопок
-$can_pin = in_array('Глава GC', $user_tags) || in_array('Команда GC', $user_tags);
-$can_delete_any = in_array('Глава GC', $user_tags);
+$can_pin = in_array('pin_files', $admin_rights);
+$can_delete_any = in_array('delete_any_file', $admin_rights);
+$can_edit_any_file = in_array('edit_any_file', $admin_rights);
 
 // Список видео-расширений для кнопки копирования ссылки
 $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
@@ -80,6 +82,122 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Файлы — Наш Файлообменник</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        /* Стили для модального окна редактирования */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+        
+        .modal {
+            background: #1a1a1a;
+            border: 2px solid #c9a84c;
+            border-radius: 12px;
+            padding: 30px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            position: relative;
+        }
+        
+        .modal h2 {
+            color: #c9a84c;
+            margin-top: 0;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .modal .close-btn {
+            position: absolute;
+            top: 10px; right: 15px;
+            background: none;
+            border: none;
+            color: #ff4444;
+            font-size: 28px;
+            cursor: pointer;
+            line-height: 1;
+        }
+        
+        .modal .close-btn:hover { color: #ff0000; }
+        
+        .modal .section {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #333;
+        }
+        
+        .modal .section:last-child { border-bottom: none; margin-bottom: 0; }
+        
+        .modal .section h3 {
+            color: #999;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        
+        .modal .tags-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .modal .logins-input {
+            width: 100%;
+            padding: 10px 12px;
+            background: #0d0d0d;
+            border: 1px solid #333;
+            border-radius: 5px;
+            color: #fff;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        
+        .modal .logins-input:focus {
+            outline: none;
+            border-color: #c9a84c;
+        }
+        
+        .modal .save-file-btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(180deg, #c9a84c, #a88a3a);
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-top: 10px;
+        }
+        
+        .modal .save-file-btn:hover {
+            box-shadow: 0 0 20px rgba(201, 168, 76, 0.4);
+        }
+        
+        .edit-file-btn {
+            background: none;
+            border: 1px solid #c9a84c;
+            color: #c9a84c;
+            font-size: 14px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-left: 4px;
+        }
+        .edit-file-btn:hover {
+            background: #1a1a00;
+            color: #fff;
+        }
+    </style>
 </head>
 
 <body class="files-page">
@@ -93,7 +211,7 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                         <span class="tag-badge"><?php echo htmlspecialchars($tag); ?></span>
                     <?php endforeach; ?>
                 </span>
-                <?php if ($user === 'admin'): ?>
+                <?php if ($_SESSION['is_admin'] ?? false): ?>
                     <a href="admin.php" class="admin-btn">⚙ Админ</a>
                 <?php endif; ?>
                 <a href="logout.php" class="logout-btn">Выйти</a>
@@ -201,6 +319,9 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                         <a href="delete.php?id=<?php echo $file['id']; ?>" class="delete-btn"
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
+                                    <?php if ($can_edit_any_file): ?>
+                                        <button class="edit-file-btn" onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
+                                    <?php endif; ?>
                                     <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
                                 </div>
                             </li>
@@ -252,6 +373,9 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                         <a href="delete.php?id=<?php echo $file['id']; ?>" class="delete-btn"
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
+                                    <?php if ($can_edit_any_file): ?>
+                                        <button class="edit-file-btn" onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
+                                    <?php endif; ?>
                                     <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
                                 </div>
                             </li>
@@ -265,7 +389,107 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
         </div>
     </div>
 
+    <!-- Модальное окно редактирования -->
+    <div class="modal-overlay" id="editModalOverlay">
+        <div class="modal">
+            <button class="close-btn" onclick="closeEditModal()">✕</button>
+            <h2>Редактирование файла: <span id="editFileName"></span></h2>
+            
+            <form id="editFileForm">
+                <input type="hidden" name="file_id" id="editFileId">
+                
+                <div class="section">
+                    <h3>Теги доступа:</h3>
+                    <div class="tags-grid" id="editTagsContainer">
+                        <?php foreach ($all_tags as $tag): ?>
+                            <label class="tag-checkbox">
+                                <input type="checkbox" name="edit_tags[]" value="<?php echo $tag; ?>">
+                                <span><?php echo $tag; ?></span>
+                            </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>Доступ по логинам (через запятую):</h3>
+                    <input type="text" name="edit_logins" class="logins-input" id="editLoginsInput" 
+                           placeholder="user1, user2">
+                    <small>Доступные: <?php echo implode(', ', $all_users); ?></small>
+                </div>
+                
+                <button type="submit" class="save-file-btn">💾 Сохранить изменения</button>
+            </form>
+        </div>
+    </div>
+
     <script>
+        // Функции для модального окна
+        function openEditModal(fileId, fileName) {
+            document.getElementById('editFileId').value = fileId;
+            document.getElementById('editFileName').textContent = fileName;
+            
+            // Загружаем текущие настройки файла
+            fetch('get_file_info.php?id=' + fileId)
+                .then(response => response.json())
+                .then(data => {
+                    // Очищаем теги
+                    document.querySelectorAll('#editTagsContainer input[type="checkbox"]').forEach(cb => cb.checked = false);
+                    // Отмечаем теги файла
+                    if (data.tags) {
+                        data.tags.forEach(tag => {
+                            const cb = document.querySelector(`#editTagsContainer input[value="${CSS.escape(tag)}"]`);
+                            if (cb) cb.checked = true;
+                        });
+                    }
+                    // Устанавливаем логины
+                    document.getElementById('editLoginsInput').value = (data.logins || []).join(', ');
+                    
+                    document.getElementById('editModalOverlay').classList.add('active');
+                });
+        }
+        
+        function closeEditModal() {
+            document.getElementById('editModalOverlay').classList.remove('active');
+        }
+        
+        // Закрытие по клику на оверлей
+        document.getElementById('editModalOverlay').addEventListener('click', function(e) {
+            if (e.target === this) closeEditModal();
+        });
+        
+        // Отправка формы
+        document.getElementById('editFileForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            
+            fetch('edit_file.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    closeEditModal();
+                    location.reload();
+                } else {
+                    alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(err => {
+                alert('Ошибка сети');
+                console.error(err);
+            });
+        });
+
+        // Вспомогательная функция для CSS.escape
+        if (!CSS.escape) {
+            CSS.escape = function(value) {
+                return String(value).replace(/([^\w-])/g, '\\$1');
+            };
+        }
+
+        // Оригинальные функции
         function copyFileLink(filename) {
             var basePath = window.location.pathname.replace(/\/[^\/]*$/, '');
             var link = window.location.origin + basePath + '/uploads/' + filename;

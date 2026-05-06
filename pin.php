@@ -7,9 +7,8 @@ if (!isset($_SESSION['user'])) {
     exit;
 }
 
-$user_tags = $_SESSION['tags'] ?? [];
-
-$can_pin = in_array('Глава GC', $user_tags) || in_array('Команда GC', $user_tags);
+$admin_rights = $_SESSION['admin_rights'] ?? [];
+$can_pin = in_array('pin_files', $admin_rights);
 
 if ($can_pin && isset($_GET['id'])) {
     $file_id = (int)$_GET['id'];

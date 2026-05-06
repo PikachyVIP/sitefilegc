@@ -31,6 +31,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['user'] = $user['login'];
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['tags'] = $tags;
+        
+        // Получаем права администратора
+        $stmt = $pdo->prepare('SELECT right_name FROM admin_rights WHERE user_id = ?');
+        $stmt->execute([$user['id']]);
+        $admin_rights = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $_SESSION['admin_rights'] = $admin_rights;
+        $_SESSION['is_admin'] = in_array('admin_panel', $admin_rights);
+        
         header('Location: files.php');
         exit;
     }

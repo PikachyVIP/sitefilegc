@@ -9,6 +9,7 @@ if (!isset($_SESSION['user'])) {
 
 $user_id = $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
+$admin_rights = $_SESSION['admin_rights'] ?? [];
 
 if (isset($_GET['id'])) {
     $file_id = (int)$_GET['id'];
@@ -21,7 +22,7 @@ if (isset($_GET['id'])) {
     if ($file) {
         $can_delete = false;
         if ($file['uploader_id'] == $user_id) $can_delete = true;
-        if (in_array('Глава GC', $user_tags)) $can_delete = true;
+        if (in_array('delete_any_file', $admin_rights)) $can_delete = true;
         
         if ($can_delete) {
             // Удаляем физический файл
