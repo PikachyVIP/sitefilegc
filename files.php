@@ -11,9 +11,11 @@ $user = $_SESSION['user'];
 $user_id = $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
 $admin_rights = $_SESSION['admin_rights'] ?? [];
+$upload_dir = 'uploads/';
+
+// Получаем все теги из БД
 $stmt = $pdo->query('SELECT name FROM tags ORDER BY id');
 $all_tags = $stmt->fetchAll(PDO::FETCH_COLUMN);
-$upload_dir = 'uploads/';
 
 // Получаем id тегов пользователя для быстрой проверки
 $user_tag_ids = [];
@@ -23,36 +25,102 @@ if (!empty($user_tags)) {
     $user_tag_ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
 }
 
-// Запрос файлов, доступных пользователю
-$query = '
-    SELECT DISTINCT f.*, u.login AS uploader_login
-    FROM files f
-    JOIN users u ON f.uploader_id = u.id
-    LEFT JOIN file_access fa ON f.id = fa.file_id
-    LEFT JOIN file_tags ft ON f.id = ft.file_id
-    WHERE 
-        f.uploader_id = ?
-        OR fa.user_id = ?
-        OR ft.tag_id IN (' . (!empty($user_tag_ids) ? implode(',', array_fill(0, count($user_tag_ids), '?')) : '0') . ')
-    ORDER BY f.is_pinned DESC, f.uploaded_at DESC
-';
+$can_view_any = in_array('view_any_file', $admin_rights);
 
-$params = [$user_id, $user_id];
-if (!empty($user_tag_ids)) {
-    $params = array_merge($params, $user_tag_ids);
+// Запрос файлов, доступных пользователю
+if ($can_view_any) {
+    // Видит вообще все файлы
+    $query = '
+        SELECT DISTINCT f.*, u.login AS uploader_login
+        FROM files f
+        JOIN users u ON f.uploader_id = u.id
+        ORDER BY f.is_pinned DESC, f.uploaded_at DESC
+    ';
+    $stmt = $pdo->prepare($query);
+    $stmt->execute();
+} else {
+    // Обычный запрос с ограничением по доступу
+    $query = '
+        SELECT DISTINCT f.*, u.login AS uploader_login
+        FROM files f
+        JOIN users u ON f.uploader_id = u.id
+        LEFT JOIN file_access fa ON f.id = fa.file_id
+        LEFT JOIN file_tags ft ON f.id = ft.file_id
+        WHERE 
+            f.uploader_id = ?
+            OR fa.user_id = ?
+            OR ft.tag_id IN (' . (!empty($user_tag_ids) ? implode(',', array_fill(0, count($user_tag_ids), '?')) : '0') . ')
+        ORDER BY f.is_pinned DESC, f.uploaded_at DESC
+    ';
+
+    $params = [$user_id, $user_id];
+    if (!empty($user_tag_ids)) {
+        $params = array_merge($params, $user_tag_ids);
+    }
+
+    $stmt = $pdo->prepare($query);
+    $stmt->execute($params);
+}
+$files = $stmt->fetchAll();
+
+// Собираем все ID файлов для массовой проверки доступа
+$all_file_ids = array_column($files, 'id');
+
+// Получаем теги всех файлов одним запросом
+$file_tags_map = [];
+if (!empty($all_file_ids)) {
+    $placeholders = implode(',', array_fill(0, count($all_file_ids), '?'));
+    $stmt = $pdo->prepare("
+        SELECT ft.file_id, t.name 
+        FROM file_tags ft 
+        JOIN tags t ON ft.tag_id = t.id 
+        WHERE ft.file_id IN ($placeholders)
+    ");
+    $stmt->execute($all_file_ids);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $file_tags_map[$row['file_id']][] = $row['name'];
+    }
 }
 
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$files = $stmt->fetchAll();
+// Получаем доступы по логинам для текущего пользователя одним запросом
+$file_access_map = [];
+if (!empty($all_file_ids)) {
+    $placeholders = implode(',', array_fill(0, count($all_file_ids), '?'));
+    $stmt = $pdo->prepare("
+        SELECT file_id 
+        FROM file_access 
+        WHERE file_id IN ($placeholders) AND user_id = ?
+    ");
+    $params = $all_file_ids;
+    $params[] = $user_id;
+    $stmt->execute($params);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $file_access_map[$row['file_id']] = true;
+    }
+}
 
 // Группируем: закреплённые и по дням
 $pinned_files = [];
 $grouped_files = [];
-foreach ($files as $file) {
-    $stmt = $pdo->prepare('SELECT t.name FROM tags t JOIN file_tags ft ON t.id = ft.tag_id WHERE ft.file_id = ?');
-    $stmt->execute([$file['id']]);
-    $file['tags'] = $stmt->fetchAll(PDO::FETCH_COLUMN);
+foreach ($files as &$file) {
+    // Присваиваем теги из массового запроса
+    $file['tags'] = $file_tags_map[$file['id']] ?? [];
+
+    // Проверяем реальный доступ к файлу
+    $is_owner = ($file['uploader_id'] == $user_id);
+    $has_tag_access = false;
+    
+    if (!$is_owner && !empty($file['tags']) && !empty($user_tags)) {
+        $common_tags = array_intersect($file['tags'], $user_tags);
+        if (!empty($common_tags)) {
+            $has_tag_access = true;
+        }
+    }
+    
+    $has_login_access = isset($file_access_map[$file['id']]);
+    
+    // Реальный доступ = владелец ИЛИ доступ через теги ИЛИ доступ через логины
+    $file['has_real_access'] = $is_owner || $has_tag_access || $has_login_access;
 
     if ($file['is_pinned']) {
         $pinned_files[] = $file;
@@ -61,12 +129,13 @@ foreach ($files as $file) {
         $grouped_files[$day][] = $file;
     }
 }
+unset($file);
 
 // Список всех пользователей для подсказки
 $stmt = $pdo->query('SELECT login FROM users ORDER BY login');
 $all_users = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-// Проверки прав для кнопок
+// Проверки прав для кнопок (строгая проверка)
 $can_pin = in_array('pin_files', $admin_rights);
 $can_delete_any = in_array('delete_any_file', $admin_rights);
 $can_edit_any_file = in_array('edit_any_file', $admin_rights);
@@ -84,7 +153,6 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
     <title>Файлы — Наш Файлообменник</title>
     <link rel="stylesheet" href="style.css">
     <style>
-        /* Стили для модального окна редактирования */
         .modal-overlay {
             display: none;
             position: fixed;
@@ -96,6 +164,20 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             z-index: 1000;
             align-items: center;
             justify-content: center;
+        }
+
+        .disabled-download {
+            background: #333 !important;
+            color: #666 !important;
+            cursor: not-allowed;
+            text-decoration: none;
+            padding: 6px 18px;
+            border-radius: 5px;
+            font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+            border: 1px solid #444;
+            display: inline-block;
         }
 
         .modal-overlay.active {
@@ -303,7 +385,25 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                     <h3>📌 Закреплённые</h3>
                     <ul class="file-list pinned-list">
                         <?php foreach ($pinned_files as $file): ?>
-                            <?php $ext = strtolower(pathinfo($file['original_name'], PATHINFO_EXTENSION)); ?>
+                            <?php
+                            $ext = strtolower(pathinfo($file['original_name'], PATHINFO_EXTENSION));
+                            $is_owner = ($file['uploader_id'] == $user_id);
+                            
+                            // Может ли пользователь скачивать файл?
+                            // 1. Владелец - всегда может
+                            // 2. Есть реальный доступ через теги/логины - может
+                            // 3. Файл виден только из-за права view_any_file - НЕ может
+                            $can_download = $file['has_real_access'];
+                            
+                            // Может ли редактировать?
+                            $can_edit = $is_owner || $can_edit_any_file;
+                            
+                            // Может ли удалять?
+                            $can_delete = $is_owner || $can_delete_any;
+                            
+                            // Может ли закреплять?
+                            $can_pin_file = $is_owner || $can_pin;
+                            ?>
                             <li class="pinned-item">
                                 <span class="pin-icon">📌</span>
                                 <div class="file-info">
@@ -322,22 +422,26 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                     </span>
                                 </div>
                                 <div class="file-actions">
-                                    <?php if ($can_pin): ?>
+                                    <?php if ($can_pin_file): ?>
                                         <a href="pin.php?id=<?php echo $file['id']; ?>" class="pin-btn" title="Закрепить">📌</a>
                                     <?php endif; ?>
-                                    <?php if (in_array($ext, $video_extensions)): ?>
+                                    <?php if (in_array($ext, $video_extensions) && $can_download): ?>
                                         <button class="copy-link-btn" onclick="copyFileLink('<?php echo $file['filename']; ?>')"
                                             title="Копировать прямую ссылку">🔗</button>
                                     <?php endif; ?>
-                                    <?php if ($can_delete_any || $user_id == $file['uploader_id']): ?>
+                                    <?php if ($can_delete): ?>
                                         <a href="delete.php?id=<?php echo $file['id']; ?>" class="delete-btn"
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
-                                    <?php if ($can_edit_any_file): ?>
+                                    <?php if ($can_edit): ?>
                                         <button class="edit-file-btn"
                                             onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
                                     <?php endif; ?>
-                                    <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
+                                    <?php if ($can_download): ?>
+                                        <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
+                                    <?php else: ?>
+                                        <span class="disabled-download">Недоступно</span>
+                                    <?php endif; ?>
                                 </div>
                             </li>
                         <?php endforeach; ?>
@@ -360,7 +464,22 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
 
                     <ul class="file-list">
                         <?php foreach ($day_files as $file): ?>
-                            <?php $ext = strtolower(pathinfo($file['original_name'], PATHINFO_EXTENSION)); ?>
+                            <?php
+                            $ext = strtolower(pathinfo($file['original_name'], PATHINFO_EXTENSION));
+                            $is_owner = ($file['uploader_id'] == $user_id);
+                            
+                            // Может ли пользователь скачивать файл?
+                            $can_download = $file['has_real_access'];
+                            
+                            // Может ли редактировать?
+                            $can_edit = $is_owner || $can_edit_any_file;
+                            
+                            // Может ли удалять?
+                            $can_delete = $is_owner || $can_delete_any;
+                            
+                            // Может ли закреплять?
+                            $can_pin_file = $is_owner || $can_pin;
+                            ?>
                             <li>
                                 <div class="file-info">
                                     <span class="file-name">📄 <?php echo htmlspecialchars($file['original_name']); ?></span>
@@ -377,22 +496,26 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                     </span>
                                 </div>
                                 <div class="file-actions">
-                                    <?php if ($can_pin): ?>
+                                    <?php if ($can_pin_file): ?>
                                         <a href="pin.php?id=<?php echo $file['id']; ?>" class="pin-btn" title="Закрепить">📌</a>
                                     <?php endif; ?>
-                                    <?php if (in_array($ext, $video_extensions)): ?>
+                                    <?php if (in_array($ext, $video_extensions) && $can_download): ?>
                                         <button class="copy-link-btn" onclick="copyFileLink('<?php echo $file['filename']; ?>')"
                                             title="Копировать прямую ссылку">🔗</button>
                                     <?php endif; ?>
-                                    <?php if ($can_delete_any || $user_id == $file['uploader_id']): ?>
+                                    <?php if ($can_delete): ?>
                                         <a href="delete.php?id=<?php echo $file['id']; ?>" class="delete-btn"
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
-                                    <?php if ($can_edit_any_file): ?>
+                                    <?php if ($can_edit): ?>
                                         <button class="edit-file-btn"
                                             onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
                                     <?php endif; ?>
-                                    <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
+                                    <?php if ($can_download): ?>
+                                        <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
+                                    <?php else: ?>
+                                        <span class="disabled-download">Недоступно</span>
+                                    <?php endif; ?>
                                 </div>
                             </li>
                         <?php endforeach; ?>
@@ -439,25 +562,20 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
     </div>
 
     <script>
-        // Функции для модального окна
         function openEditModal(fileId, fileName) {
             document.getElementById('editFileId').value = fileId;
             document.getElementById('editFileName').textContent = fileName;
 
-            // Загружаем текущие настройки файла
             fetch('get_file_info.php?id=' + fileId)
                 .then(response => response.json())
                 .then(data => {
-                    // Очищаем теги
                     document.querySelectorAll('#editTagsContainer input[type="checkbox"]').forEach(cb => cb.checked = false);
-                    // Отмечаем теги файла
                     if (data.tags) {
                         data.tags.forEach(tag => {
                             const cb = document.querySelector(`#editTagsContainer input[value="${CSS.escape(tag)}"]`);
                             if (cb) cb.checked = true;
                         });
                     }
-                    // Устанавливаем логины
                     document.getElementById('editLoginsInput').value = (data.logins || []).join(', ');
 
                     document.getElementById('editModalOverlay').classList.add('active');
@@ -468,12 +586,10 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             document.getElementById('editModalOverlay').classList.remove('active');
         }
 
-        // Закрытие по клику на оверлей
         document.getElementById('editModalOverlay').addEventListener('click', function (e) {
             if (e.target === this) closeEditModal();
         });
 
-        // Отправка формы
         document.getElementById('editFileForm').addEventListener('submit', function (e) {
             e.preventDefault();
 
@@ -498,14 +614,12 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                 });
         });
 
-        // Вспомогательная функция для CSS.escape
         if (!CSS.escape) {
             CSS.escape = function (value) {
                 return String(value).replace(/([^\w-])/g, '\\$1');
             };
         }
 
-        // Оригинальные функции
         function copyFileLink(filename) {
             var basePath = window.location.pathname.replace(/\/[^\/]*$/, '');
             var link = window.location.origin + basePath + '/uploads/' + filename;

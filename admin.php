@@ -80,25 +80,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 }
 
 // === СОХРАНЕНИЕ ТЕГОВ ПОЛЬЗОВАТЕЛЕЙ (edit_user_tags) ===
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'save_tags' && in_array('edit_user_tags', $admin_rights)) {
-    $pdo->beginTransaction();
-    try {
-        $pdo->exec('DELETE FROM user_tags');
-        if (isset($_POST['user_tags']) && is_array($_POST['user_tags'])) {
-            $stmt = $pdo->prepare('INSERT INTO user_tags (user_id, tag_id) VALUES (?, (SELECT id FROM tags WHERE name = ?))');
-            foreach ($_POST['user_tags'] as $user_id => $tags) {
-                if (is_array($tags)) {
-                    foreach ($tags as $tag) {
-                        $stmt->execute([(int)$user_id, $tag]);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'save_tags') {
+    if (!in_array('edit_user_tags', $admin_rights)) {
+        $error = '❌ У вас нет прав на изменение тегов пользователей!';
+    } else {
+        $pdo->beginTransaction();
+        try {
+            $pdo->exec('DELETE FROM user_tags');
+            if (isset($_POST['user_tags']) && is_array($_POST['user_tags'])) {
+                $stmt = $pdo->prepare('INSERT INTO user_tags (user_id, tag_id) VALUES (?, (SELECT id FROM tags WHERE name = ?))');
+                foreach ($_POST['user_tags'] as $user_id => $tags) {
+                    if (is_array($tags)) {
+                        foreach ($tags as $tag) {
+                            $stmt->execute([(int)$user_id, $tag]);
+                        }
                     }
                 }
             }
+            $pdo->commit();
+            $message = '✅ Теги сохранены!';
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            $error = '❌ Ошибка сохранения тегов!';
         }
-        $pdo->commit();
-        $message = '✅ Теги сохранены!';
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        $error = '❌ Ошибка сохранения тегов!';
     }
 }
 
@@ -321,7 +325,7 @@ foreach ($users as $user) {
                 <?php if (in_array('edit_user_tags', $admin_rights)): ?>
                 <div class="admin-block">
                     <h2>🔑 Теги пользователей</h2>
-                    <form method="POST">
+                    <form method="POST" onsubmit="return confirm('Сохранить изменения тегов пользователей?')">
                         <input type="hidden" name="action" value="save_tags">
                         
                         <?php foreach ($users as $user): ?>

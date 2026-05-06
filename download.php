@@ -12,7 +12,7 @@ if (!isset($_GET['id'])) {
     exit;
 }
 
-$file_id = (int)$_GET['id'];
+$file_id = (int) $_GET['id'];
 $user_id = $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
 
@@ -25,11 +25,6 @@ $stmt = $pdo->prepare('
 ');
 $stmt->execute([$file_id]);
 $file = $stmt->fetch();
-
-if (!$file) {
-    die('Файл не найден');
-}
-
 // Проверяем доступ
 $can_download = false;
 
@@ -42,7 +37,8 @@ if ($file['uploader_id'] == $user_id) {
 if (!$can_download) {
     $stmt = $pdo->prepare('SELECT 1 FROM file_access WHERE file_id = ? AND user_id = ?');
     $stmt->execute([$file_id, $user_id]);
-    if ($stmt->fetch()) $can_download = true;
+    if ($stmt->fetch())
+        $can_download = true;
 }
 
 // Доступ по тегам
@@ -55,7 +51,14 @@ if (!$can_download && !empty($user_tags)) {
         WHERE ft.file_id = ? AND t.name IN ($placeholders)
     ");
     $stmt->execute(array_merge([$file_id], $user_tags));
-    if ($stmt->fetch()) $can_download = true;
+    if ($stmt->fetch())
+        $can_download = true;
+}
+
+// Если у пользователя есть view_any_file НО нет обычного доступа - запрещаем скачивание
+$admin_rights = $_SESSION['admin_rights'] ?? [];
+if (!$can_download && in_array('view_any_file', $admin_rights)) {
+    die('🔒 У вас есть право просмотра, но не скачивания этого файла.');
 }
 
 if (!$can_download) {
@@ -70,7 +73,8 @@ if (!file_exists($filepath)) {
 }
 
 // Очищаем буфер вывода
-if (ob_get_level()) ob_end_clean();
+if (ob_get_level())
+    ob_end_clean();
 
 // Отправляем заголовки
 header('Content-Description: File Transfer');
