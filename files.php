@@ -11,7 +11,8 @@ $user = $_SESSION['user'];
 $user_id = $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
 $admin_rights = $_SESSION['admin_rights'] ?? [];
-$all_tags = ['Глава GC', 'Команда GC', 'Програмист GC', 'Художник GC', 'Билдер GC', 'Игрок', 'Доверенный'];
+$stmt = $pdo->query('SELECT name FROM tags ORDER BY id');
+$all_tags = $stmt->fetchAll(PDO::FETCH_COLUMN);
 $upload_dir = 'uploads/';
 
 // Получаем id тегов пользователя для быстрой проверки
@@ -87,14 +88,20 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
         .modal-overlay {
             display: none;
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.8);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
             z-index: 1000;
             align-items: center;
             justify-content: center;
         }
-        .modal-overlay.active { display: flex; }
-        
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
         .modal {
             background: #1a1a1a;
             border: 2px solid #c9a84c;
@@ -106,17 +113,18 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             overflow-y: auto;
             position: relative;
         }
-        
+
         .modal h2 {
             color: #c9a84c;
             margin-top: 0;
             margin-bottom: 20px;
             text-align: center;
         }
-        
+
         .modal .close-btn {
             position: absolute;
-            top: 10px; right: 15px;
+            top: 10px;
+            right: 15px;
             background: none;
             border: none;
             color: #ff4444;
@@ -124,30 +132,35 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             cursor: pointer;
             line-height: 1;
         }
-        
-        .modal .close-btn:hover { color: #ff0000; }
-        
+
+        .modal .close-btn:hover {
+            color: #ff0000;
+        }
+
         .modal .section {
             margin-bottom: 20px;
             padding-bottom: 20px;
             border-bottom: 1px solid #333;
         }
-        
-        .modal .section:last-child { border-bottom: none; margin-bottom: 0; }
-        
+
+        .modal .section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+
         .modal .section h3 {
             color: #999;
             font-size: 14px;
             margin-bottom: 10px;
         }
-        
+
         .modal .tags-grid {
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
             margin-bottom: 10px;
         }
-        
+
         .modal .logins-input {
             width: 100%;
             padding: 10px 12px;
@@ -158,12 +171,12 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             font-size: 14px;
             margin-bottom: 10px;
         }
-        
+
         .modal .logins-input:focus {
             outline: none;
             border-color: #c9a84c;
         }
-        
+
         .modal .save-file-btn {
             width: 100%;
             padding: 14px;
@@ -177,11 +190,11 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             transition: all 0.3s;
             margin-top: 10px;
         }
-        
+
         .modal .save-file-btn:hover {
             box-shadow: 0 0 20px rgba(201, 168, 76, 0.4);
         }
-        
+
         .edit-file-btn {
             background: none;
             border: 1px solid #c9a84c;
@@ -193,6 +206,7 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
             transition: all 0.2s;
             margin-left: 4px;
         }
+
         .edit-file-btn:hover {
             background: #1a1a00;
             color: #fff;
@@ -320,7 +334,8 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
                                     <?php if ($can_edit_any_file): ?>
-                                        <button class="edit-file-btn" onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
+                                        <button class="edit-file-btn"
+                                            onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
                                     <?php endif; ?>
                                     <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
                                 </div>
@@ -374,7 +389,8 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                                             onclick="return confirm('Точно удалить файл?')" title="Удалить">✕</a>
                                     <?php endif; ?>
                                     <?php if ($can_edit_any_file): ?>
-                                        <button class="edit-file-btn" onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
+                                        <button class="edit-file-btn"
+                                            onclick="openEditModal(<?php echo $file['id']; ?>, '<?php echo htmlspecialchars($file['original_name'], ENT_QUOTES); ?>')">✎</button>
                                     <?php endif; ?>
                                     <a href="download.php?id=<?php echo $file['id']; ?>" class="download-btn">Скачать</a>
                                 </div>
@@ -394,10 +410,10 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
         <div class="modal">
             <button class="close-btn" onclick="closeEditModal()">✕</button>
             <h2>Редактирование файла: <span id="editFileName"></span></h2>
-            
+
             <form id="editFileForm">
                 <input type="hidden" name="file_id" id="editFileId">
-                
+
                 <div class="section">
                     <h3>Теги доступа:</h3>
                     <div class="tags-grid" id="editTagsContainer">
@@ -409,14 +425,14 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                         <?php endforeach; ?>
                     </div>
                 </div>
-                
+
                 <div class="section">
                     <h3>Доступ по логинам (через запятую):</h3>
-                    <input type="text" name="edit_logins" class="logins-input" id="editLoginsInput" 
-                           placeholder="user1, user2">
+                    <input type="text" name="edit_logins" class="logins-input" id="editLoginsInput"
+                        placeholder="user1, user2">
                     <small>Доступные: <?php echo implode(', ', $all_users); ?></small>
                 </div>
-                
+
                 <button type="submit" class="save-file-btn">💾 Сохранить изменения</button>
             </form>
         </div>
@@ -427,7 +443,7 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
         function openEditModal(fileId, fileName) {
             document.getElementById('editFileId').value = fileId;
             document.getElementById('editFileName').textContent = fileName;
-            
+
             // Загружаем текущие настройки файла
             fetch('get_file_info.php?id=' + fileId)
                 .then(response => response.json())
@@ -443,48 +459,48 @@ $video_extensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'];
                     }
                     // Устанавливаем логины
                     document.getElementById('editLoginsInput').value = (data.logins || []).join(', ');
-                    
+
                     document.getElementById('editModalOverlay').classList.add('active');
                 });
         }
-        
+
         function closeEditModal() {
             document.getElementById('editModalOverlay').classList.remove('active');
         }
-        
+
         // Закрытие по клику на оверлей
-        document.getElementById('editModalOverlay').addEventListener('click', function(e) {
+        document.getElementById('editModalOverlay').addEventListener('click', function (e) {
             if (e.target === this) closeEditModal();
         });
-        
+
         // Отправка формы
-        document.getElementById('editFileForm').addEventListener('submit', function(e) {
+        document.getElementById('editFileForm').addEventListener('submit', function (e) {
             e.preventDefault();
-            
+
             const formData = new FormData(this);
-            
+
             fetch('edit_file.php', {
                 method: 'POST',
                 body: formData
             })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    closeEditModal();
-                    location.reload();
-                } else {
-                    alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
-                }
-            })
-            .catch(err => {
-                alert('Ошибка сети');
-                console.error(err);
-            });
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        closeEditModal();
+                        location.reload();
+                    } else {
+                        alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+                    }
+                })
+                .catch(err => {
+                    alert('Ошибка сети');
+                    console.error(err);
+                });
         });
 
         // Вспомогательная функция для CSS.escape
         if (!CSS.escape) {
-            CSS.escape = function(value) {
+            CSS.escape = function (value) {
                 return String(value).replace(/([^\w-])/g, '\\$1');
             };
         }
