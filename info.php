@@ -33,7 +33,7 @@ gc_head('Инфо', 'info');
             <div class="gc_feature_ico"><span class="gc_ico gc_ico--shield" aria-hidden="true"></span></div>
             <h3>Доступ по тегам</h3>
             <p>Файл видит загрузивший, пользователи с совпадающим тегом и те, кому выдан личный доступ. Право просмотра без права скачивания не открывает файл.</p>
-            <span class="gc_tag gc_tag--accent">Закрытый сайт</span>
+            <span class="gc_tag gc_tag--accent">Закрытый сайт команды</span>
         </article>
 
         <article class="gc_card gc_card--glass gc_feature">
