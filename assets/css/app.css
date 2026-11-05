@@ -1294,9 +1294,8 @@
 .gc_tree { list-style: none; }
 .gc_tree ul {
     list-style: none;
-    margin-left: 9px;
-    padding-left: 8px;
-    border-left: 1px solid color-mix(in srgb, var(--gc_border-2) 70%, transparent);
+    margin-left: 0;
+    padding-left: 0;
 }
 .gc_tree ul[hidden] { display: none; }
 
@@ -1426,13 +1425,19 @@
 }
 .gc_crumbs {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 4px;
     min-width: 0;
+    max-width: 100%;
+    padding-bottom: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
     font-size: 11.5px;
     color: var(--gc_text-muted);
 }
+.gc_crumbs > * { flex: 0 0 auto; }
 .gc_crumbs a {
     color: var(--gc_text-dim);
     text-decoration: none;
@@ -2412,6 +2417,8 @@ input[type="file"]::file-selector-button:hover {
 .gc_storage--drive { grid-template-columns: 268px minmax(0, 1fr); gap: 18px; }
 .gc_drive_sidebar {
     top: 14px;
+    min-width: 0;
+    overflow: hidden;
     padding: 12px 12px 14px;
     border-radius: 18px;
     background:
@@ -2881,10 +2888,43 @@ dialog.gc_preview_modal { width: min(980px, calc(100vw - 24px)); }
 .gc_modal_form { display: flex; align-items: flex-end; gap: 10px; margin-top: 16px; }
 .gc_modal_form .gc_field { flex: 1; margin: 0; }
 .gc_modal_form--stack { display: flex; flex-direction: column; align-items: stretch; }
+.gc_delete_choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 6px; }
+.gc_delete_choice {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: 10px;
+    align-items: center;
+    padding: 13px;
+    border: 1px solid var(--gc_border-1);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--gc_surface-1) 78%, transparent);
+    color: var(--gc_text);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color .16s ease, background .16s ease;
+}
+.gc_delete_choice:hover { border-color: var(--gc_accent); background: rgba(242, 180, 4, .07); }
+.gc_delete_choice_icon {
+    display: grid;
+    place-items: center;
+    grid-row: 1 / 3;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    color: var(--gc_accent);
+    background: rgba(242, 180, 4, .09);
+}
+.gc_delete_choice_icon .gc_ico { width: 17px; height: 17px; }
+.gc_delete_choice strong { font-size: 12.5px; font-weight: 600; }
+.gc_delete_choice small { color: var(--gc_text-muted); font-size: 10.5px; line-height: 1.4; }
+.gc_delete_choice--danger:hover { border-color: var(--gc_danger); background: rgba(224, 106, 106, .08); }
+.gc_delete_choice--danger .gc_delete_choice_icon { color: var(--gc_danger); background: rgba(224, 106, 106, .1); }
 .gc_modal_actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--gc_border-1); }
 .gc_modal_actions form { margin: 0; }
 @media (max-width: 620px) {
     .gc_modal_form { flex-direction: column; align-items: stretch; }
+    .gc_delete_choices { grid-template-columns: 1fr; }
     .gc_modal_actions { flex-direction: column; align-items: stretch; }
     .gc_modal_actions .gc_btn { width: 100%; }
     .gc_drive_folder_acts { opacity: 1; }

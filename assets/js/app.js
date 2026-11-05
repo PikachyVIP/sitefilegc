@@ -686,6 +686,34 @@
         }
     }
 
+    /* ---------- folder delete choice ---------- */
+
+    function initFolderDeleteDialog() {
+        var dialog = document.getElementById('gcFolderDeleteDialog');
+        if (!dialog) return;
+        var idInput = dialog.querySelector('[data-folder-delete-id]');
+        var nameNode = dialog.querySelector('[data-folder-delete-name]');
+
+        function closeDialog() {
+            if (dialog.open) dialog.close();
+        }
+
+        dialog.addEventListener('click', function (event) {
+            if (event.target === dialog) closeDialog();
+        });
+        dialog.querySelectorAll('[data-close-dialog]').forEach(function (button) {
+            button.addEventListener('click', closeDialog);
+        });
+        $$('[data-folder-delete]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                if (!idInput) return;
+                idInput.value = button.getAttribute('data-folder-delete') || '';
+                if (nameNode) nameNode.textContent = button.getAttribute('data-folder-delete-name') || 'Папка';
+                dialog.showModal();
+            });
+        });
+    }
+
     /* ---------- persistent upload queue ---------- */
 
     function initUploadManager() {
@@ -1367,6 +1395,7 @@
         initViewToggle();
         initFileDrag();
         initTagDialogs();
+        initFolderDeleteDialog();
         initPreviewDialog();
         initUploadManager();
     }

@@ -450,8 +450,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $parentId = (int) ($folderRow['parent_id'] ?? 0);
+        $mode = isset($_POST['mode']) && $_POST['mode'] === 'with_files' ? 'with_files' : 'move';
         $treeIds = [$id];
-        $cursor = 0;
+        $next = [];
         do {
             $known = implode(',', array_map('intval', $treeIds));
             $statement = $pdo->query('SELECT id FROM folders WHERE parent_id IN (' . $known . ')');
@@ -462,11 +463,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } while ($next !== []);
         $treeIn = implode(',', array_map('intval', $treeIds));
-        $pdo->prepare('UPDATE files SET folder_id = ? WHERE folder_id IN (' . $treeIn . ')')
-            ->execute([$parentId > 0 ? $parentId : null]);
-        $pdo->prepare('DELETE FROM folders WHERE id = ?')->execute([$id]);
-        $where = $parentId > 0 ? 'в родительскую папку' : 'в корень';
-        gc_flash('ok', 'Папка удалена. Файлы из неё перемещены ' . $where . '.');
+        $targetParentId = $isPersonalFolder ? gc_personal_folder_id($pdo, (int) $folderRow['created_by']) : 0;
+        $filePaths = [];
+        $fileCount = 0;
+
+        try {
+            $pdo->beginTransaction();
+            if ($mode === 'with_files') {
+                $statement = $pdo->query('SELECT filename FROM files WHERE folder_id IN (' . $treeIn . ')');
+                foreach ($statement->fetchAll(PDO::FETCH_COLUMN) as $storedName) {
+                    $storedName = (string) $storedName;
+                    if ($storedName !== '' && basename($storedName) === $storedName) {
+                        $filePaths[] = $uploadDir . '/' . $storedName;
+                    }
+                    $fileCount++;
+                }
+                $pdo->prepare('DELETE FROM files WHERE folder_id IN (' . $treeIn . ')')->execute();
+            } else {
+                $statement = $pdo->prepare('UPDATE files SET folder_id = ? WHERE folder_id IN (' . $treeIn . ')');
+                $statement->execute([$targetParentId > 0 ? $targetParentId : null]);
+                $fileCount = $statement->rowCount();
+            }
+            $pdo->prepare('DELETE FROM folders WHERE id = ?')->execute([$id]);
+            $pdo->commit();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            gc_flash('error', 'Не удалось удалить папку. Попробуйте ещё раз.');
+            gc_redirect($returnUrl);
+        }
+
+        $unlinkFailed = 0;
+        foreach ($filePaths as $filePath) {
+            if (is_file($filePath) && !@unlink($filePath)) {
+                $unlinkFailed++;
+            }
+        }
+        if ($mode === 'with_files') {
+            $message = 'Папка удалена вместе с файлами: ' . $fileCount . '.';
+            if ($unlinkFailed > 0) {
+                $message .= ' Не удалось удалить файлов с диска: ' . $unlinkFailed . '.';
+            }
+            gc_flash($unlinkFailed > 0 ? 'error' : 'ok', $message);
+        } else {
+            gc_flash('ok', 'Папка удалена. Файлы перемещены в корень: ' . $fileCount . '.');
+        }
         gc_redirect(gc_storage_link($parentId, $returnSort, $returnDir, $returnScope));
     }
 
@@ -902,7 +944,7 @@ $canManageCurrent = !$adminPersonal && $folderId > 0
     && !$isPersonalRootRow($folderMap[$folderId] ?? [])
     && ((int) ($folderMap[$folderId]['created_by'] ?? 0) === $uid || gc_is_admin() || $canEditAny);
 
-$renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope, $adminPersonal): void {
+$renderTree = function (int $parent, int $depth = 0) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope, $adminPersonal): void {
     if (empty($children[$parent])) {
         return;
     }
@@ -917,7 +959,8 @@ $renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $
             $treeLabel .= ' · ' . $node['creator_login'];
         }
         echo '<li class="gc_tree_item">';
-        echo '<div class="gc_tree_row' . ($active ? ' is-active' : '') . '">';
+        $rowStyle = $depth > 0 ? ' style="padding-left:' . (7 + min($depth, 5) * 11) . 'px"' : '';
+        echo '<div class="gc_tree_row' . ($active ? ' is-active' : '') . '"' . $rowStyle . '>';
         echo '<button type="button" class="gc_tree_toggle' . ($hasChildren ? '' : ' is-empty') . '"'
             . ' aria-expanded="true"' . ($hasChildren ? ' aria-controls="tree-' . $id . '"' : '') . '>'
             . '<span class="gc_ico gc_ico--chevron"></span></button>';
@@ -928,7 +971,7 @@ $renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $
         echo '</a></div>';
         if ($hasChildren) {
             echo '<ul id="tree-' . $id . '">';
-            $renderTree($id);
+            $renderTree($id, $depth + 1);
             echo '</ul>';
         }
         echo '</li>';
@@ -1061,16 +1104,9 @@ gc_head('Хранилище', 'storage');
                     <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block">Переименовать</button>
                 </form>
                 <?php if ($scope !== 'personal' || $folderId !== $personalRootId) { ?>
-                <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($folderMap[$folderId]['name']) ?>»? Вложенные папки тоже удалятся, файлы переместятся в <?= $folderMap[$folderId]['parent_id'] > 0 ? 'родительскую папку' : 'корень' ?>.">
-                    <?= gc_csrf_field() ?>
-                    <input type="hidden" name="action" value="folder_delete">
-                    <input type="hidden" name="id" value="<?= $folderId ?>">
-                    <input type="hidden" name="folder" value="<?= $folderId ?>">
-                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
-                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
-                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
-                    <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block gc_text-danger">Удалить папку</button>
-                </form>
+                <button type="button" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block gc_text-danger"
+                        data-folder-delete="<?= $folderId ?>"
+                        data-folder-delete-name="<?= gc_h($folderMap[$folderId]['name']) ?>">Удалить папку</button>
                 <?php } ?>
             </details>
             <?php } ?>
@@ -1291,18 +1327,11 @@ gc_head('Хранилище', 'storage');
                                     data-folder-edit="<?= $childId ?>" data-folder-name="<?= gc_h($childLabel) ?>">
                                 <span class="gc_ico gc_ico--rename"></span>
                             </button>
-                            <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($child['name']) ?>»? Файлы из неё перейдут в <?= $child['parent_id'] > 0 ? 'родительскую папку' : 'корень' ?>.">
-                                <?= gc_csrf_field() ?>
-                                <input type="hidden" name="action" value="folder_delete">
-                                <input type="hidden" name="id" value="<?= $childId ?>">
-                                <input type="hidden" name="folder" value="<?= $folderId ?>">
-                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
-                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
-                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
-                                <button type="submit" class="gc_iconbtn gc_iconbtn--danger" title="Удалить папку" aria-label="Удалить папку">
-                                    <span class="gc_ico gc_ico--delete"></span>
-                                </button>
-                            </form>
+                            <button type="button" class="gc_iconbtn gc_iconbtn--danger" title="Удалить папку" aria-label="Удалить папку"
+                                    data-folder-delete="<?= $childId ?>"
+                                    data-folder-delete-name="<?= gc_h($child['name']) ?>">
+                                <span class="gc_ico gc_ico--delete"></span>
+                            </button>
                             <?php } ?>
                         </div>
                     </div>
@@ -1705,6 +1734,48 @@ gc_head('Хранилище', 'storage');
                 </div>
                 <button type="submit" class="gc_btn gc_btn--primary">Сохранить</button>
             </form>
+        </div>
+    </dialog>
+
+    <dialog class="gc_modal" id="gcFolderDeleteDialog">
+        <div class="gc_modal_panel">
+            <div class="gc_modal_head">
+                <div>
+                    <span class="gc_modal_eyebrow">Удаление</span>
+                    <h2>Удалить папку?</h2>
+                </div>
+                <button type="button" class="gc_iconbtn" data-close-dialog title="Закрыть" aria-label="Закрыть">
+                    <span class="gc_ico gc_ico--close"></span>
+                </button>
+            </div>
+            <p class="gc_modal_lead">
+                Папка «<b data-folder-delete-name></b>» и все вложенные папки будут удалены.
+                Выберите, что сделать с файлами внутри.
+            </p>
+            <form method="post" action="storage.php" class="gc_modal_form gc_modal_form--stack" data-folder-delete-form>
+                <?= gc_csrf_field() ?>
+                <input type="hidden" name="action" value="folder_delete">
+                <input type="hidden" name="id" value="" data-folder-delete-id>
+                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                <div class="gc_delete_choices">
+                    <button type="submit" name="mode" value="move" class="gc_delete_choice">
+                        <span class="gc_delete_choice_icon"><span class="gc_ico gc_ico--folder"></span></span>
+                        <strong>Перенести в корень</strong>
+                        <small>Файлы останутся, вложенные папки исчезнут.</small>
+                    </button>
+                    <button type="submit" name="mode" value="with_files" class="gc_delete_choice gc_delete_choice--danger">
+                        <span class="gc_delete_choice_icon"><span class="gc_ico gc_ico--delete"></span></span>
+                        <strong>Удалить с файлами</strong>
+                        <small>Файлы будут удалены с диска без восстановления.</small>
+                    </button>
+                </div>
+            </form>
+            <div class="gc_modal_actions">
+                <button type="button" class="gc_btn gc_btn--ghost" data-close-dialog>Отмена</button>
+            </div>
         </div>
     </dialog>
 
