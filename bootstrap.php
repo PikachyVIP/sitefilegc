@@ -13,6 +13,9 @@ const GC_APP_NAME = 'GC Files';
 const GC_APP_VERSION = '2.2.0';
 const GC_ASSET_VERSION = '2.2.10';
 
+// Hard ceiling for every uploaded file, independent of php.ini. 20 GiB.
+const GC_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
+
 const GC_CATEGORIES = [
     'release' => 'Релиз',
     'site' => 'Сайт',
@@ -348,7 +351,7 @@ function gc_ini_bytes(string $value): int
 
 function gc_max_upload(): int
 {
-    $limits = [];
+    $limits = [GC_MAX_UPLOAD_BYTES];
     $upload = gc_ini_bytes((string) ini_get('upload_max_filesize'));
     $post = gc_ini_bytes((string) ini_get('post_max_size'));
     if ($upload > 0) {
@@ -358,7 +361,7 @@ function gc_max_upload(): int
         $limits[] = $post;
     }
 
-    return $limits === [] ? 0 : min($limits);
+    return min($limits);
 }
 
 function gc_upload_error(int $code): string
