@@ -1,0 +1,68 @@
+:root {
+    --gc_page: color-mix(in srgb, var(--cm_background) 55%, var(--c_main));
+
+    --gc_surface-1: color-mix(in srgb, var(--cm_background) 86%, var(--c_purple_main));
+    --gc_surface-2: var(--c_purple_main);
+    --gc_surface-3: color-mix(in srgb, var(--c_purple_0) 28%, var(--cm_background));
+    --gc_surface-glass: color-mix(in srgb, var(--cm_background) 70%, transparent);
+
+    --gc_border-1: color-mix(in srgb, var(--cm_border) 65%, transparent);
+    --gc_border-2: var(--cm_border);
+    --gc_border-gold: color-mix(in srgb, var(--c_g_min-1) 42%, transparent);
+    --gc_border-active: var(--cm_border_active);
+
+    --gc_accent: var(--c_g_min-1);
+    --gc_accent-soft: var(--c_g_min-0);
+    --gc_accent-deep: var(--c_g_min-2);
+    --gc_accent-grad: var(--c_gold);
+    --gc_online: var(--c_rating-up);
+    --gc_danger: var(--c_red_1);
+    --gc_info: var(--c_blue_3);
+    --gc_violet: var(--c_purple_1);
+
+    --gc_text: var(--c_text-main);
+    --gc_text-dim: color-mix(in srgb, var(--c_text-main) 72%, transparent);
+    --gc_text-muted: var(--c_text-side);
+    --gc_text-muted-light: var(--c_text-side-light);
+    --gc_text-on-accent: var(--c_text-main_side);
+
+    --gc_r-sm: 8px;
+    --gc_r-md: 14px;
+    --gc_r-lg: 20px;
+    --gc_r-xl: 28px;
+    --gc_r-pill: 999px;
+
+    --gc_s-1: 4px;
+    --gc_s-2: 8px;
+    --gc_s-3: 12px;
+    --gc_s-4: 16px;
+    --gc_s-5: 24px;
+    --gc_s-6: 32px;
+    --gc_s-7: 48px;
+    --gc_s-8: 64px;
+    --gc_s-9: 96px;
+
+    --gc_f-xs: 12px;
+    --gc_f-sm: 14px;
+    --gc_f-md: 16px;
+    --gc_f-lg: 20px;
+    --gc_f-xl: 24px;
+    --gc_f-2xl: 32px;
+    --gc_f-3xl: 40px;
+    --gc_f-4xl: 56px;
+
+    --gc_t-hero: clamp(30px, 4.1vw, 56px);
+    --gc_t-h2: clamp(22px, 2.5vw, 34px);
+    --gc_t-h3: clamp(17px, 1.5vw, 21px);
+    --gc_t-body: clamp(14px, 1.05vw, 17px);
+    --gc_t-small: clamp(12px, 0.86vw, 14px);
+
+    --gc_container: 1600px;
+    --gc_header-h: 90px;
+
+    --gc_shadow-card: 0 18px 44px color-mix(in srgb, var(--shadow) 42%, transparent);
+    --gc_glow-accent: 0 0 26px color-mix(in srgb, var(--c_g_min-1) 32%, transparent);
+    --gc_glow-online: 0 0 12px color-mix(in srgb, var(--c_rating-up) 55%, transparent);
+
+    --gc_ease: 0.18s ease;
+}

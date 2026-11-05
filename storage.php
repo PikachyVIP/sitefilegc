@@ -1,0 +1,1385 @@
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/layout.php';
+
+$user = gc_require_login();
+$uid = (int) $user['id'];
+$uploadDir = __DIR__ . '/uploads';
+
+$folderId = isset($_GET['folder']) ? (int) $_GET['folder'] : 0;
+$sort = isset($_GET['sort']) && is_string($_GET['sort']) ? $_GET['sort'] : 'date';
+if (!in_array($sort, ['name', 'date', 'size', 'type'], true)) {
+    $sort = 'date';
+}
+$dir = isset($_GET['dir']) && $_GET['dir'] === 'asc' ? 'asc' : 'desc';
+$scope = isset($_GET['scope']) && is_string($_GET['scope']) ? $_GET['scope'] : 'all';
+if (!in_array($scope, ['all', 'mine', 'tag', 'direct'], true)) {
+    $scope = 'all';
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    gc_csrf_check();
+    $action = isset($_POST['action']) && is_string($_POST['action']) ? $_POST['action'] : '';
+    $returnFolder = isset($_POST['folder']) ? (int) $_POST['folder'] : 0;
+    $returnSort = isset($_POST['sort']) && is_string($_POST['sort']) ? $_POST['sort'] : 'date';
+    if (!in_array($returnSort, ['name', 'date', 'size', 'type'], true)) {
+        $returnSort = 'date';
+    }
+    $returnDir = isset($_POST['dir']) && $_POST['dir'] === 'asc' ? 'asc' : 'desc';
+    $returnScope = isset($_POST['scope']) && is_string($_POST['scope']) ? $_POST['scope'] : 'all';
+    if (!in_array($returnScope, ['all', 'mine', 'tag', 'direct'], true)) {
+        $returnScope = 'all';
+    }
+    $returnUrl = gc_storage_link($returnFolder, $returnSort, $returnDir, $returnScope);
+
+    if ($action === 'upload') {
+        $isAjax = (isset($_POST['ajax']) && (string) $_POST['ajax'] === '1')
+            || (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
+        $respondJson = static function (array $payload, int $status = 200) use ($isAjax): void {
+            if (!$isAjax) {
+                return;
+            }
+            http_response_code($status);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+            exit;
+        };
+
+        $targetFolder = $returnFolder;
+        if ($targetFolder > 0) {
+            $check = $pdo->prepare('SELECT 1 FROM folders WHERE id = ?');
+            $check->execute([$targetFolder]);
+            if (!$check->fetchColumn()) {
+                $targetFolder = 0;
+            }
+        }
+
+        $incoming = $_FILES['files'] ?? $_FILES['file'] ?? null;
+        $queue = [];
+        if (is_array($incoming) && isset($incoming['name'])) {
+            if (is_array($incoming['name'])) {
+                foreach (array_keys($incoming['name']) as $index) {
+                    $queue[] = [
+                        'name' => (string) $incoming['name'][$index],
+                        'tmp_name' => (string) $incoming['tmp_name'][$index],
+                        'error' => (int) $incoming['error'][$index],
+                        'size' => (int) $incoming['size'][$index],
+                    ];
+                }
+            } else {
+                $queue[] = [
+                    'name' => (string) $incoming['name'],
+                    'tmp_name' => (string) $incoming['tmp_name'],
+                    'error' => (int) $incoming['error'],
+                    'size' => (int) $incoming['size'],
+                ];
+            }
+        }
+        $queue = array_values(array_filter($queue, static fn (array $item): bool => $item['error'] !== UPLOAD_ERR_NO_FILE));
+
+        if ($queue === []) {
+            $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => ['Файл не выбран.']]);
+            gc_flash('error', 'Файл не выбран.');
+            gc_redirect($returnUrl);
+        }
+
+        if (!gc_ensure_data_dir($uploadDir)) {
+            $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => ['Папка uploads недоступна для записи.']], 500);
+            gc_flash('error', 'Папка uploads недоступна для записи.');
+            gc_redirect($returnUrl);
+        }
+
+        $tagIds = [];
+        if (isset($_POST['tags']) && is_array($_POST['tags'])) {
+            foreach ($_POST['tags'] as $rawTag) {
+                $tagId = (int) $rawTag;
+                if ($tagId > 0) {
+                    $tagIds[$tagId] = $tagId;
+                }
+            }
+        }
+        $tagIds = array_values($tagIds);
+        if ($tagIds !== []) {
+            $in = implode(',', array_fill(0, count($tagIds), '?'));
+            $statement = $pdo->prepare('SELECT id FROM tags WHERE id IN (' . $in . ')');
+            $statement->execute($tagIds);
+            $tagIds = array_map('intval', $statement->fetchAll(PDO::FETCH_COLUMN));
+        }
+
+        $loginIds = [];
+        if (isset($_POST['logins']) && is_string($_POST['logins'])) {
+            $parts = preg_split('/[\s,;]+/', $_POST['logins']);
+            $logins = [];
+            foreach ($parts ?: [] as $login) {
+                $login = trim($login);
+                if ($login !== '') {
+                    $logins[$login] = $login;
+                }
+            }
+            $logins = array_slice(array_values($logins), 0, 50);
+            if ($logins !== []) {
+                $in = implode(',', array_fill(0, count($logins), '?'));
+                $statement = $pdo->prepare('SELECT id FROM users WHERE login IN (' . $in . ')');
+                $statement->execute($logins);
+                $loginIds = array_map('intval', $statement->fetchAll(PDO::FETCH_COLUMN));
+            }
+        }
+
+        $uploaded = 0;
+        $errors = [];
+        $max = gc_max_upload();
+        foreach ($queue as $item) {
+            $label = $item['name'] !== '' ? $item['name'] : 'файл';
+            if ($item['error'] !== UPLOAD_ERR_OK) {
+                $errors[] = $label . ': ' . gc_upload_error($item['error']);
+                continue;
+            }
+            if ($max > 0 && $item['size'] > $max) {
+                $errors[] = $label . ': больше допустимого размера ' . gc_size($max) . '.';
+                continue;
+            }
+            if (!is_uploaded_file($item['tmp_name'])) {
+                $errors[] = $label . ': загрузка не подтверждена сервером.';
+                continue;
+            }
+
+            $original = gc_safe_upload_name($item['name']);
+            $ext = gc_clean_ext($original);
+            $stored = bin2hex(random_bytes(16)) . ($ext !== '' ? '.' . $ext : '');
+            $path = $uploadDir . '/' . $stored;
+
+            if (!move_uploaded_file($item['tmp_name'], $path)) {
+                $errors[] = $label . ': не удалось сохранить на сервере.';
+                continue;
+            }
+
+            try {
+                $pdo->beginTransaction();
+                $statement = $pdo->prepare(
+                    'INSERT INTO files (filename, original_name, uploader_id, folder_id, file_size, mime_type)
+                     VALUES (?, ?, ?, ?, ?, ?) RETURNING id'
+                );
+                $statement->execute([
+                    $stored,
+                    $original,
+                    $uid,
+                    $targetFolder > 0 ? $targetFolder : null,
+                    $item['size'],
+                    gc_mime_type($path),
+                ]);
+                $fileId = (int) $statement->fetchColumn();
+
+                $tagStatement = $pdo->prepare('INSERT INTO file_tags (file_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING');
+                foreach ($tagIds as $tagId) {
+                    $tagStatement->execute([$fileId, $tagId]);
+                }
+
+                $accessStatement = $pdo->prepare('INSERT INTO file_access (file_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING');
+                foreach ($loginIds as $loginId) {
+                    $accessStatement->execute([$fileId, $loginId]);
+                }
+
+                $pdo->commit();
+                $uploaded++;
+            } catch (Throwable $exception) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                @unlink($path);
+                $errors[] = $label . ': не удалось сохранить в базе.';
+            }
+        }
+
+        $message = $uploaded > 0
+            ? 'Загружено файлов: ' . $uploaded . ($errors !== [] ? ', с ошибками: ' . count($errors) : '') . '.'
+            : 'Ни один файл не загружен.';
+        $respondJson([
+            'ok' => $uploaded > 0,
+            'uploaded' => $uploaded,
+            'errors' => $errors,
+            'message' => $message,
+            'redirect' => $returnUrl,
+        ]);
+
+        if ($uploaded > 0) {
+            gc_flash('ok', 'Загружено файлов: ' . $uploaded . '.');
+        }
+        foreach (array_slice($errors, 0, 5) as $error) {
+            gc_flash('error', $error);
+        }
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'folder_create') {
+        $parentId = $returnFolder;
+        if ($parentId > 0) {
+            $check = $pdo->prepare('SELECT 1 FROM folders WHERE id = ?');
+            $check->execute([$parentId]);
+            if (!$check->fetchColumn()) {
+                $parentId = 0;
+            }
+        }
+        $name = isset($_POST['folder_name']) && is_string($_POST['folder_name']) ? trim($_POST['folder_name']) : '';
+        if ($name === '' || gc_strlen($name) > 80) {
+            gc_flash('error', 'Название папки должно быть от 1 до 80 символов.');
+            gc_redirect($returnUrl);
+        }
+
+        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?)');
+        $statement->execute([$parentId, $name]);
+        if ($statement->fetchColumn()) {
+            gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
+            gc_redirect($returnUrl);
+        }
+
+        $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by) VALUES (?, ?, ?) RETURNING id');
+        $statement->execute([$name, $parentId > 0 ? $parentId : null, $uid]);
+        $newFolderId = (int) $statement->fetchColumn();
+
+        gc_flash('ok', 'Папка «' . $name . '» создана.');
+        gc_redirect(gc_storage_link($newFolderId, $returnSort, $returnDir, $returnScope));
+    }
+
+    if ($action === 'folder_rename') {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $name = isset($_POST['folder_name']) && is_string($_POST['folder_name']) ? trim($_POST['folder_name']) : '';
+        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by FROM folders WHERE id = ?');
+        $statement->execute([$id]);
+        $folderRow = $statement->fetch();
+
+        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+            gc_flash('error', 'Переименовать папку может только её создатель или администратор.');
+            gc_redirect($returnUrl);
+        }
+        if ($name === '' || gc_strlen($name) > 80) {
+            gc_flash('error', 'Название папки должно быть от 1 до 80 символов.');
+            gc_redirect($returnUrl);
+        }
+
+        $parentId = (int) ($folderRow['parent_id'] ?? 0);
+        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND id <> ?');
+        $statement->execute([$parentId, $name, $id]);
+        if ($statement->fetchColumn()) {
+            gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
+            gc_redirect($returnUrl);
+        }
+
+        $pdo->prepare('UPDATE folders SET name = ? WHERE id = ?')->execute([$name, $id]);
+        gc_flash('ok', 'Папка переименована.');
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'folder_delete') {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by FROM folders WHERE id = ?');
+        $statement->execute([$id]);
+        $folderRow = $statement->fetch();
+
+        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+            gc_flash('error', 'Удалить папку может только её создатель или администратор.');
+            gc_redirect($returnUrl);
+        }
+
+        $parentId = (int) ($folderRow['parent_id'] ?? 0);
+        $pdo->prepare('DELETE FROM folders WHERE id = ?')->execute([$id]);
+        gc_flash('ok', 'Папка удалена. Файлы из неё перемещены в корень.');
+        gc_redirect(gc_storage_link($parentId, $returnSort, $returnDir, $returnScope));
+    }
+
+    if (in_array($action, ['folder_tag_add', 'folder_tag_delete', 'folder_tags_sync'], true)) {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $statement = $pdo->prepare('SELECT id, name, created_by FROM folders WHERE id = ?');
+        $statement->execute([$id]);
+        $folderRow = $statement->fetch();
+
+        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+            gc_flash('error', 'Настраивать теги папки может только её создатель или администратор.');
+            gc_redirect($returnUrl);
+        }
+
+        if ($action === 'folder_tags_sync') {
+            $statement = $pdo->prepare('SELECT COUNT(*) FROM folder_tags WHERE folder_id = ?');
+            $statement->execute([$id]);
+            if ((int) $statement->fetchColumn() === 0) {
+                gc_flash('error', 'У папки нет тегов — сначала добавьте хотя бы один.');
+                gc_redirect($returnUrl);
+            }
+
+            $statement = $pdo->prepare(
+                'WITH RECURSIVE sub AS ('
+                . ' SELECT id FROM folders WHERE id = ?'
+                . ' UNION ALL'
+                . ' SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id'
+                . ')'
+                . ' INSERT INTO file_tags (file_id, tag_id)'
+                . ' SELECT f.id, ft.tag_id FROM files f'
+                . ' JOIN sub s ON s.id = f.folder_id'
+                . ' CROSS JOIN folder_tags ft'
+                . ' WHERE ft.folder_id = ?'
+                . ' ON CONFLICT DO NOTHING'
+            );
+            $statement->execute([$id, $id]);
+            gc_flash('ok', 'Теги папки синхронизированы с файлами: добавлено связей — ' . $statement->rowCount() . '.');
+            gc_redirect($returnUrl);
+        }
+
+        $tagId = isset($_POST['tag_id']) ? (int) $_POST['tag_id'] : 0;
+        $statement = $pdo->prepare('SELECT 1 FROM tags WHERE id = ?');
+        $statement->execute([$tagId]);
+        if (!$statement->fetchColumn()) {
+            gc_flash('error', 'Тег не найден.');
+            gc_redirect($returnUrl);
+        }
+
+        if ($action === 'folder_tag_add') {
+            $pdo->prepare('INSERT INTO folder_tags (folder_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING')
+                ->execute([$id, $tagId]);
+            gc_flash('ok', 'Тег добавлен папке.');
+        } else {
+            $pdo->prepare('DELETE FROM folder_tags WHERE folder_id = ? AND tag_id = ?')->execute([$id, $tagId]);
+            gc_flash('ok', 'Тег убран у папки.');
+        }
+        gc_redirect($returnUrl);
+    }
+
+    if (in_array($action, ['file_tag_add', 'file_tag_delete'], true)) {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $statement = $pdo->prepare('SELECT id, original_name, uploader_id FROM files WHERE id = ?');
+        $statement->execute([$id]);
+        $fileRow = $statement->fetch();
+
+        if (!$fileRow || ((int) $fileRow['uploader_id'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+            gc_flash('error', 'Менять теги файла может только автор или администратор.');
+            gc_redirect($returnUrl);
+        }
+
+        $tagId = isset($_POST['tag_id']) ? (int) $_POST['tag_id'] : 0;
+        $statement = $pdo->prepare('SELECT 1 FROM tags WHERE id = ?');
+        $statement->execute([$tagId]);
+        if (!$statement->fetchColumn()) {
+            gc_flash('error', 'Тег не найден.');
+            gc_redirect($returnUrl);
+        }
+
+        if ($action === 'file_tag_add') {
+            $pdo->prepare('INSERT INTO file_tags (file_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING')
+                ->execute([$id, $tagId]);
+            gc_flash('ok', 'Тег добавлен файлу.');
+        } else {
+            $pdo->prepare('DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?')->execute([$id, $tagId]);
+            gc_flash('ok', 'Тег убран у файла.');
+        }
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'file_move') {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $targetFolder = isset($_POST['target_folder']) ? (int) $_POST['target_folder'] : 0;
+        if ($targetFolder < 0) {
+            $targetFolder = 0;
+        }
+
+        $statement = $pdo->prepare('SELECT id, original_name, uploader_id, folder_id FROM files WHERE id = ?');
+        $statement->execute([$id]);
+        $fileRow = $statement->fetch();
+
+        if (!$fileRow) {
+            gc_flash('error', 'Файл не найден.');
+            gc_redirect($returnUrl);
+        }
+        if ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('edit_any_file')) {
+            gc_flash('error', 'Перемещать этот файл может только автор или администратор с правом редактирования.');
+            gc_redirect($returnUrl);
+        }
+
+        $targetLabel = 'в корень';
+        if ($targetFolder > 0) {
+            $statement = $pdo->prepare('SELECT name FROM folders WHERE id = ?');
+            $statement->execute([$targetFolder]);
+            $targetName = $statement->fetchColumn();
+            if ($targetName === false) {
+                gc_flash('error', 'Папка назначения не найдена.');
+                gc_redirect($returnUrl);
+            }
+            $targetLabel = 'в «' . (string) $targetName . '»';
+        }
+
+        $currentFolder = $fileRow['folder_id'] !== null ? (int) $fileRow['folder_id'] : 0;
+        if ($currentFolder === $targetFolder) {
+            gc_flash('info', 'Файл уже находится в этом месте.');
+            gc_redirect($returnUrl);
+        }
+
+        $pdo->prepare('UPDATE files SET folder_id = ? WHERE id = ?')
+            ->execute([$targetFolder > 0 ? $targetFolder : null, $id]);
+        gc_flash('ok', 'Файл «' . (string) $fileRow['original_name'] . '» перемещён ' . $targetLabel . '.');
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'file_delete') {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $statement = $pdo->prepare('SELECT id, filename, uploader_id FROM files WHERE id = ?');
+        $statement->execute([$id]);
+        $fileRow = $statement->fetch();
+
+        if (!$fileRow) {
+            gc_flash('error', 'Файл не найден.');
+            gc_redirect($returnUrl);
+        }
+        if ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('delete_any_file')) {
+            gc_flash('error', 'Удалить этот файл может только автор или администратор с правом удаления.');
+            gc_redirect($returnUrl);
+        }
+
+        $stored = (string) $fileRow['filename'];
+        if ($stored !== '' && !str_contains($stored, '/') && !str_contains($stored, '\\')) {
+            $path = $uploadDir . '/' . $stored;
+            if (is_file($path)) {
+                @unlink($path);
+            }
+        }
+        $pdo->prepare('DELETE FROM files WHERE id = ?')->execute([$id]);
+        gc_flash('ok', 'Файл удалён.');
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'file_pin') {
+        if (!gc_has_right('pin_files')) {
+            gc_flash('error', 'Закреплять файлы может только администратор с правом закрепления.');
+            gc_redirect($returnUrl);
+        }
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $pdo->prepare('UPDATE files SET is_pinned = NOT is_pinned WHERE id = ?')->execute([$id]);
+        gc_redirect($returnUrl);
+    }
+
+    gc_redirect($returnUrl);
+}
+
+$folders = $pdo->query('SELECT id, name, parent_id, created_by FROM folders ORDER BY lower(name), id')->fetchAll();
+$folderMap = [];
+$children = [];
+foreach ($folders as $folderRow) {
+    $id = (int) $folderRow['id'];
+    $parent = $folderRow['parent_id'] !== null ? (int) $folderRow['parent_id'] : 0;
+    $folderMap[$id] = [
+        'id' => $id,
+        'name' => (string) $folderRow['name'],
+        'parent_id' => $parent,
+        'created_by' => (int) $folderRow['created_by'],
+    ];
+    $children[$parent][] = $id;
+}
+
+$folderTags = [];
+$folderTagRows = [];
+foreach ($pdo->query('SELECT ft.folder_id, t.id AS tag_id, t.name FROM folder_tags ft JOIN tags t ON t.id = ft.tag_id ORDER BY t.name')->fetchAll() as $tagRow) {
+    $folderTags[(int) $tagRow['folder_id']][] = (string) $tagRow['name'];
+    $folderTagRows[(int) $tagRow['folder_id']][] = [
+        'id' => (int) $tagRow['tag_id'],
+        'name' => (string) $tagRow['name'],
+    ];
+}
+
+$userTagSet = [];
+if (isset($user['tags']) && is_array($user['tags'])) {
+    foreach ($user['tags'] as $tagName) {
+        $userTagSet[(string) $tagName] = true;
+    }
+}
+
+$viewAll = gc_has_right('view_any_file');
+$visibleFolderIds = [];
+foreach ($folderMap as $id => $folderRow) {
+    $tagsForFolder = $folderTagRows[$id] ?? [];
+    $visible = $tagsForFolder === [] || $viewAll || (int) $folderRow['created_by'] === $uid;
+    if (!$visible) {
+        foreach ($tagsForFolder as $tagForFolder) {
+            if (isset($userTagSet[$tagForFolder['name']])) {
+                $visible = true;
+                break;
+            }
+        }
+    }
+    if ($visible) {
+        $visibleFolderIds[$id] = true;
+    }
+}
+$folderMap = array_intersect_key($folderMap, $visibleFolderIds);
+do {
+    $changed = false;
+    foreach ($folderMap as $id => $folderRow) {
+        if ($folderRow['parent_id'] > 0 && !isset($folderMap[$folderRow['parent_id']])) {
+            unset($folderMap[$id]);
+            $changed = true;
+        }
+    }
+} while ($changed);
+
+$children = [];
+foreach ($folderMap as $id => $folderRow) {
+    $children[$folderRow['parent_id']][] = $id;
+}
+
+if ($folderId > 0 && !isset($folderMap[$folderId])) {
+    $folderId = 0;
+}
+
+$pathFolders = [];
+$cursor = $folderId;
+$seen = [];
+while ($cursor > 0 && isset($folderMap[$cursor]) && !isset($seen[$cursor])) {
+    $seen[$cursor] = true;
+    array_unshift($pathFolders, $folderMap[$cursor]);
+    $cursor = $folderMap[$cursor]['parent_id'];
+}
+
+$visibleFolderSql = '';
+$visibleIds = array_keys($folderMap);
+if ($visibleIds !== []) {
+    $visibleFolderSql = ' AND (f.folder_id IS NULL OR f.folder_id IN (' . implode(',', array_map('intval', $visibleIds)) . '))';
+} else {
+    $visibleFolderSql = ' AND f.folder_id IS NULL';
+}
+
+if ($viewAll) {
+    $accessSql = $visibleFolderSql;
+    $accessParams = [];
+} else {
+    $accessSql = ' AND (f.uploader_id = ?'
+        . ' OR EXISTS (SELECT 1 FROM file_access fa WHERE fa.file_id = f.id AND fa.user_id = ?)'
+        . ' OR EXISTS (SELECT 1 FROM file_tags ft JOIN user_tags ut ON ut.tag_id = ft.tag_id'
+        . ' WHERE ft.file_id = f.id AND ut.user_id = ?))' . $visibleFolderSql;
+    $accessParams = [$uid, $uid, $uid];
+}
+
+$scopeSql = '';
+$scopeParams = [];
+if ($scope === 'mine') {
+    $scopeSql = ' AND f.uploader_id = ?';
+    $scopeParams = [$uid];
+} elseif ($scope === 'tag') {
+    $scopeSql = ' AND EXISTS (SELECT 1 FROM file_tags ft2 JOIN user_tags ut2 ON ut2.tag_id = ft2.tag_id'
+        . ' WHERE ft2.file_id = f.id AND ut2.user_id = ?)';
+    $scopeParams = [$uid];
+} elseif ($scope === 'direct') {
+    $scopeSql = ' AND EXISTS (SELECT 1 FROM file_access fa2 WHERE fa2.file_id = f.id AND fa2.user_id = ?)';
+    $scopeParams = [$uid];
+}
+
+$filterSql = $accessSql . $scopeSql;
+$filterParams = array_merge($accessParams, $scopeParams);
+
+$countStatement = $pdo->prepare('SELECT f.folder_id, COUNT(*) AS c FROM files f WHERE 1 = 1' . $filterSql . ' GROUP BY f.folder_id');
+$countStatement->execute($filterParams);
+$folderCounts = [];
+$totalVisible = 0;
+foreach ($countStatement->fetchAll() as $countRow) {
+    $key = $countRow['folder_id'] !== null ? (int) $countRow['folder_id'] : 0;
+    $count = (int) $countRow['c'];
+    $folderCounts[$key] = $count;
+    $totalVisible += $count;
+}
+$folderCounts[0] = $folderCounts[0] ?? 0;
+
+$scopeCounts = ['all' => 0, 'mine' => 0, 'tag' => 0, 'direct' => 0];
+$scopeFilters = [
+    'all' => ['', []],
+    'mine' => [' AND f.uploader_id = ?', [$uid]],
+    'tag' => [' AND EXISTS (SELECT 1 FROM file_tags ft3 JOIN user_tags ut3 ON ut3.tag_id = ft3.tag_id'
+        . ' WHERE ft3.file_id = f.id AND ut3.user_id = ?)', [$uid]],
+    'direct' => [' AND EXISTS (SELECT 1 FROM file_access fa3 WHERE fa3.file_id = f.id AND fa3.user_id = ?)', [$uid]],
+];
+foreach ($scopeFilters as $scopeKey => [$scopeWhere, $scopeWhereParams]) {
+    $scopeStatement = $pdo->prepare('SELECT COUNT(*) FROM files f WHERE 1 = 1' . $accessSql . $scopeWhere);
+    $scopeStatement->execute(array_merge($accessParams, $scopeWhereParams));
+    $scopeCounts[$scopeKey] = (int) $scopeStatement->fetchColumn();
+}
+
+$orderBy = [
+    'name' => 'lower(f.original_name)',
+    'date' => 'f.uploaded_at',
+    'size' => 'f.file_size',
+    'type' => "lower(coalesce(f.mime_type, ''))",
+][$sort];
+$direction = $dir === 'asc' ? 'ASC' : 'DESC';
+
+$fileStatement = $pdo->prepare(
+    'SELECT f.id, f.original_name, f.file_size, f.mime_type, f.uploaded_at, f.is_pinned, f.folder_id, f.uploader_id, u.login AS uploader'
+    . ' FROM files f JOIN users u ON u.id = f.uploader_id'
+    . ' WHERE f.folder_id IS NOT DISTINCT FROM ?' . $filterSql
+    . ' ORDER BY f.is_pinned DESC, ' . $orderBy . ' ' . $direction . ', f.id DESC'
+);
+$fileStatement->execute(array_merge([$folderId > 0 ? $folderId : null], $filterParams));
+$files = $fileStatement->fetchAll();
+
+$fileTags = [];
+$fileTagRowsById = [];
+if ($files !== []) {
+    $ids = array_map(static fn (array $row): int => (int) $row['id'], $files);
+    $in = implode(',', array_fill(0, count($ids), '?'));
+    $tagStatement = $pdo->prepare(
+        'SELECT ft.file_id, t.id AS tag_id, t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id'
+        . ' WHERE ft.file_id IN (' . $in . ') ORDER BY t.name'
+    );
+    $tagStatement->execute($ids);
+    foreach ($tagStatement->fetchAll() as $tagRow) {
+        $fileTags[(int) $tagRow['file_id']][] = (string) $tagRow['name'];
+        $fileTagRowsById[(int) $tagRow['file_id']][] = [
+            'id' => (int) $tagRow['tag_id'],
+            'name' => (string) $tagRow['name'],
+        ];
+    }
+}
+
+$accessStatement = $pdo->prepare('SELECT file_id FROM file_access WHERE user_id = ?');
+$accessStatement->execute([$uid]);
+$directAccess = [];
+foreach ($accessStatement->fetchAll(PDO::FETCH_COLUMN) as $fileId) {
+    $directAccess[(int) $fileId] = true;
+}
+
+$canPin = gc_has_right('pin_files');
+$canDeleteAny = gc_has_right('delete_any_file');
+$canEditAny = gc_has_right('edit_any_file');
+$canManageCurrent = $folderId > 0
+    && ((int) ($folderMap[$folderId]['created_by'] ?? 0) === $uid || gc_is_admin() || $canEditAny);
+
+$renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope): void {
+    if (empty($children[$parent])) {
+        return;
+    }
+    echo '<ul>';
+    foreach ($children[$parent] as $id) {
+        $node = $folderMap[$id];
+        $hasChildren = !empty($children[$id]);
+        $active = $id === $folderId;
+        $count = $folderCounts[$id] ?? 0;
+        echo '<li class="gc_tree_item">';
+        echo '<div class="gc_tree_row' . ($active ? ' is-active' : '') . '">';
+        echo '<button type="button" class="gc_tree_toggle' . ($hasChildren ? '' : ' is-empty') . '"'
+            . ' aria-expanded="true"' . ($hasChildren ? ' aria-controls="tree-' . $id . '"' : '') . '>'
+            . '<span class="gc_ico gc_ico--chevron"></span></button>';
+        echo '<a class="gc_tree_link" data-drop-folder="' . $id . '" href="' . gc_h(gc_storage_link($id, $sort, $dir, $scope)) . '" title="' . gc_h($node['name']) . '">';
+        echo '<span class="gc_ico gc_ico--folder"></span>';
+        echo '<span class="gc_tree_name">' . gc_h($node['name']) . '</span>';
+        echo '<span class="gc_tree_count">' . $count . '</span>';
+        echo '</a></div>';
+        if ($hasChildren) {
+            echo '<ul id="tree-' . $id . '">';
+            $renderTree($id);
+            echo '</ul>';
+        }
+        echo '</li>';
+    }
+    echo '</ul>';
+};
+
+$currentName = $folderId > 0 ? $folderMap[$folderId]['name'] : 'Корень хранилища';
+$maxSizeLabel = gc_size(gc_max_upload());
+$allTags = $pdo->query('SELECT id, name FROM tags ORDER BY name')->fetchAll();
+$tagListAttr = static function (array $rows): string {
+    $json = json_encode($rows, JSON_UNESCAPED_UNICODE);
+    return gc_h($json === false ? '[]' : $json);
+};
+$canManageFolderRow = static function (array $folderRow) use ($uid, $canEditAny): bool {
+    return (int) $folderRow['created_by'] === $uid || gc_is_admin() || $canEditAny;
+};
+$currentFolderTags = $folderTagRows[$folderId] ?? [];
+
+$childFolders = $children[$folderId] ?? [];
+$fileWord = static function (int $n): string {
+    $mod10 = $n % 10;
+    $mod100 = $n % 100;
+    if ($mod10 === 1 && $mod100 !== 11) {
+        return 'файл';
+    }
+    if ($mod10 >= 2 && $mod10 <= 4 && ($mod100 < 10 || $mod100 >= 20)) {
+        return 'файла';
+    }
+    return 'файлов';
+};
+$scopeLabels = ['all' => 'Все файлы', 'mine' => 'Мои файлы', 'tag' => 'По тегам', 'direct' => 'Личный доступ'];
+$scopeIcons = ['all' => 'folder', 'mine' => 'user', 'tag' => 'permission', 'direct' => 'link'];
+$roleTags = isset($user['tags']) && is_array($user['tags']) ? array_values($user['tags']) : [];
+$rightLabels = [];
+if (isset($user['rights']) && is_array($user['rights'])) {
+    foreach ($user['rights'] as $rightName) {
+        $rightLabels[] = GC_RIGHTS[$rightName] ?? (string) $rightName;
+    }
+}
+
+gc_head('Хранилище', 'storage');
+?>
+<div class="gc_wrap gc_wrap--drive">
+    <?php gc_flashes(); ?>
+
+    <section class="gc_drive_head">
+        <div>
+            <div class="gc_hero_eyebrow">Файлы команды</div>
+            <h1 class="gc_h1 gc_drive_title">Хранилище</h1>
+            <p class="gc_drive_lead">Файлы и папки команды. Доступ — по правам и ролям: владелец, тег, личный доступ или админ.</p>
+        </div>
+        <div class="gc_drive_stats">
+            <div class="gc_hero_stat"><b><?= $totalVisible ?></b><span>файлов в этом виде</span></div>
+            <div class="gc_hero_stat"><b><?= count($folderMap) ?></b><span>папок</span></div>
+            <div class="gc_hero_stat"><b><?= count($roleTags) ?></b><span>ролей</span></div>
+        </div>
+    </section>
+
+    <div class="gc_storage gc_storage--drive">
+        <aside class="gc_card gc_sidebar gc_drive_sidebar">
+            <div class="gc_sidebar_head">
+                <h2>Хранилище</h2>
+                <span class="gc_badge"><?= count($folderMap) ?></span>
+            </div>
+
+            <nav class="gc_drive_scopes" aria-label="Вид по доступу">
+                <?php foreach ($scopeLabels as $scopeKey => $scopeLabel) { ?>
+                <a class="gc_drive_scope<?= $scope === $scopeKey ? ' is-active' : '' ?>" href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scopeKey)) ?>">
+                    <span class="gc_ico gc_ico--<?= gc_h($scopeIcons[$scopeKey]) ?>" aria-hidden="true"></span>
+                    <span><?= gc_h($scopeLabel) ?></span>
+                    <b><?= (int) $scopeCounts[$scopeKey] ?></b>
+                </a>
+                <?php } ?>
+            </nav>
+
+            <div class="gc_drive_side_title">Папки</div>
+            <ul class="gc_tree">
+                <li class="gc_tree_item gc_tree_root">
+                    <div class="gc_tree_row<?= $folderId === 0 ? ' is-active' : '' ?>">
+                        <a class="gc_tree_link" data-drop-folder="0" href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scope)) ?>">
+                            <span class="gc_ico gc_ico--folder"></span>
+                            <span class="gc_tree_name">Корень</span>
+                            <span class="gc_tree_count"><?= $folderCounts[0] ?></span>
+                        </a>
+                    </div>
+                    <?php $renderTree(0); ?>
+                </li>
+            </ul>
+
+            <details class="gc_tree_new" id="new-folder">
+                <summary><span class="gc_ico gc_ico--plus"></span> Новая папка<?= $folderId > 0 ? ' здесь' : '' ?></summary>
+                <form method="post" action="storage.php">
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="folder_create">
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                    <input class="gc_input" type="text" name="folder_name" maxlength="80" required placeholder="Название папки">
+                    <button type="submit" class="gc_btn gc_btn--outline gc_btn--sm gc_btn--block">Создать</button>
+                </form>
+            </details>
+
+            <?php if ($canManageCurrent) { ?>
+            <details class="gc_tree_manage">
+                <summary><span class="gc_ico gc_ico--gear"></span> Управление папкой</summary>
+                <form method="post" action="storage.php">
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="folder_rename">
+                    <input type="hidden" name="id" value="<?= $folderId ?>">
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                    <input class="gc_input" type="text" name="folder_name" maxlength="80" required value="<?= gc_h($folderMap[$folderId]['name']) ?>">
+                    <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block">Переименовать</button>
+                </form>
+                <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($folderMap[$folderId]['name']) ?>»? Вложенные папки тоже удалятся, файлы переместятся в корень.">
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="folder_delete">
+                    <input type="hidden" name="id" value="<?= $folderId ?>">
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                    <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block gc_text-danger">Удалить папку</button>
+                </form>
+            </details>
+            <?php } ?>
+
+            <div class="gc_drive_roles">
+                <div class="gc_drive_side_title">Ваши роли</div>
+                <div class="gc_taglist">
+                    <?php if ($roleTags === []) { ?>
+                    <span class="gc_tag gc_tag--xs">Участник</span>
+                    <?php } else { ?>
+                    <?php foreach ($roleTags as $roleTag) { ?>
+                    <span class="gc_tag gc_tag--xs gc_tag--accent"><?= gc_h((string) $roleTag) ?></span>
+                    <?php } ?>
+                    <?php } ?>
+                </div>
+                <small class="gc_muted"><?= $rightLabels === [] ? 'Базовые права участника' : gc_h(implode(' · ', $rightLabels)) ?></small>
+            </div>
+        </aside>
+
+        <div class="gc_storage_main" data-drive-view="grid">
+            <div class="gc_drive_bar">
+                <div class="gc_crumbs">
+                    <a href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scope)) ?>" data-drop-folder="0">Хранилище</a>
+                    <?php foreach ($pathFolders as $index => $pathFolder) { ?>
+                    <span class="sep">/</span>
+                    <?php if ($index === count($pathFolders) - 1) { ?>
+                    <span><?= gc_h($pathFolder['name']) ?></span>
+                    <?php } else { ?>
+                    <a href="<?= gc_h(gc_storage_link((int) $pathFolder['id'], $sort, $dir, $scope)) ?>" data-drop-folder="<?= (int) $pathFolder['id'] ?>"><?= gc_h($pathFolder['name']) ?></a>
+                    <?php } ?>
+                    <?php } ?>
+                </div>
+
+                <div class="gc_drive_bar_actions">
+                    <div class="gc_toolbar_search">
+                        <span class="gc_ico gc_ico--search"></span>
+                        <input class="gc_input" type="search" data-file-search placeholder="Поиск в папке" aria-label="Поиск по имени файла">
+                    </div>
+                    <div class="gc_viewtoggle" role="group" aria-label="Вид">
+                        <button type="button" class="gc_viewbtn is-active" data-view-btn="grid" title="Сетка" aria-label="Сетка" aria-pressed="true">
+                            <span class="gc_ico gc_ico--grid"></span>
+                        </button>
+                        <button type="button" class="gc_viewbtn" data-view-btn="list" title="Список" aria-label="Список" aria-pressed="false">
+                            <span class="gc_ico gc_ico--list"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="gc_drive_toolbar">
+                <div class="gc_sort">
+                    <span class="gc_sort_label">Сортировка</span>
+                    <?php
+                    $sortLabels = ['name' => 'Имя', 'date' => 'Дата', 'size' => 'Размер', 'type' => 'Тип'];
+                    foreach ($sortLabels as $key => $label) {
+                        $nextDir = $sort === $key && $dir === 'asc' ? 'desc' : 'asc';
+                        $active = $sort === $key;
+                        ?>
+                    <a class="gc_sortbtn<?= $active ? ' is-active' : '' ?><?= $active && $dir === 'desc' ? ' is-desc' : '' ?>"
+                       href="<?= gc_h(gc_storage_link($folderId, $key, $nextDir, $scope)) ?>"
+                       title="Сортировать по: <?= gc_h($label) ?>">
+                        <?= gc_h($label) ?>
+                        <?php if ($active) { ?><span class="gc_ico gc_ico--arrow"></span><?php } ?>
+                    </a>
+                    <?php } ?>
+                </div>
+
+                <span class="gc_toolbar_count"><?= count($files) ?> <?= $fileWord(count($files)) ?></span>
+
+                <div class="gc_toolbar_actions">
+                    <?php if ($folderId > 0) { ?>
+                    <a class="gc_btn gc_btn--ghost gc_btn--sm" href="folder_download.php?folder=<?= $folderId ?>" title="Скачать папку архивом">
+                        <span class="gc_ico gc_ico--download"></span> Скачать
+                    </a>
+                    <?php } ?>
+                    <?php if ($canManageCurrent && $folderId > 0) { ?>
+                    <button type="button" class="gc_btn gc_btn--ghost gc_btn--sm" title="Теги папки"
+                            data-folder-tags="<?= $folderId ?>"
+                            data-folder-name="<?= gc_h($currentName) ?>"
+                            data-folder-tag-list="<?= $tagListAttr($currentFolderTags) ?>">
+                        <span class="gc_ico gc_ico--permission"></span> Теги
+                    </button>
+                    <?php } ?>
+                    <button type="button" class="gc_btn gc_btn--primary" data-open-details="upload">
+                        <span class="gc_ico gc_ico--upload"></span> Загрузить
+                    </button>
+                    <button type="button" class="gc_btn gc_btn--outline" data-open-details="new-folder">
+                        <span class="gc_ico gc_ico--plus"></span> Папка
+                    </button>
+                </div>
+            </div>
+
+            <details class="gc_upload_panel" id="upload"<?= $files === [] && $childFolders === [] ? ' open' : '' ?>>
+                <summary>
+                    <h2>Загрузить файл</h2>
+                    <span class="gc_upload_hintline"><?= gc_h($currentName) ?> · <?= gc_h($scopeLabels[$scope]) ?></span>
+                    <span class="gc_ico gc_ico--chevron"></span>
+                </summary>
+                <form method="post" action="storage.php" enctype="multipart/form-data" id="gcUploadForm" data-upload-form>
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="upload">
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+
+                    <div class="gc_upload_row">
+                        <label class="gc_drop" for="file">
+                            <input type="file" id="file" name="files[]" multiple required>
+                            <span class="gc_drop_icon gc_ico gc_ico--upload" aria-hidden="true"></span>
+                            <strong>Перетащите файлы или выберите</strong>
+                            <span class="gc_drop_file" data-drop-name></span>
+                            <small class="gc_drop_hint" data-drop-hint>Можно несколько · до <?= gc_h($maxSizeLabel) ?> каждый</small>
+                        </label>
+
+                        <div>
+                            <?php if ($allTags !== []) { ?>
+                            <div class="gc_field">
+                                <span class="gc_label">Теги видимости</span>
+                                <div class="gc_checks">
+                                    <?php foreach ($allTags as $tagRow) { ?>
+                                    <label class="gc_check">
+                                        <input type="checkbox" name="tags[]" value="<?= (int) $tagRow['id'] ?>">
+                                        <span><?= gc_h($tagRow['name']) ?></span>
+                                    </label>
+                                    <?php } ?>
+                                </div>
+                            </div>
+                            <?php } ?>
+
+                            <div class="gc_field">
+                                <label class="gc_label" for="logins">Личный доступ <span class="gc_muted">(логины через запятую)</span></label>
+                                <input class="gc_input" id="logins" type="text" name="logins" placeholder="login1, login2">
+                            </div>
+
+                            <div class="gc_upload_progress" data-upload-progress hidden>
+                                <div class="gc_upload_bar"><span data-upload-bar></span></div>
+                                <div class="gc_upload_progress_meta">
+                                    <span data-upload-percent>0%</span>
+                                    <small data-upload-status>Загрузка…</small>
+                                </div>
+                            </div>
+
+                            <button type="submit" class="gc_btn gc_btn--primary gc_btn--block">
+                                <span class="gc_ico gc_ico--upload"></span> Загрузить файлы
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </details>
+
+            <?php if ($childFolders !== []) { ?>
+            <section class="gc_drive_section">
+                <div class="gc_drive_section_head">
+                    <h2>Папки</h2>
+                    <span class="gc_badge"><?= count($childFolders) ?></span>
+                </div>
+                <div class="gc_drive_folders">
+                    <?php foreach ($childFolders as $childId) {
+                        $child = $folderMap[$childId];
+                        $childCount = $folderCounts[$childId] ?? 0;
+                        $childTagRows = $folderTagRows[$childId] ?? [];
+                        $childTags = $folderTags[$childId] ?? [];
+                        $canManageChild = $canManageFolderRow($child);
+                        ?>
+                    <div class="gc_drive_folder" data-drop-folder="<?= $childId ?>">
+                        <a class="gc_drive_folder_open" href="<?= gc_h(gc_storage_link($childId, $sort, $dir, $scope)) ?>" draggable="false">
+                            <span class="gc_drive_folder_icon"><span class="gc_ico gc_ico--folder"></span></span>
+                            <span class="gc_drive_folder_name"><?= gc_h($child['name']) ?></span>
+                            <span class="gc_drive_folder_meta"><?= $childCount ?> <?= $fileWord($childCount) ?></span>
+                            <?php if ($childTags !== []) { ?>
+                            <span class="gc_drive_folder_tags">
+                                <?php foreach (array_slice($childTags, 0, 2) as $folderTag) { ?>
+                                <span class="gc_tag gc_tag--xs"><?= gc_h($folderTag) ?></span>
+                                <?php } ?>
+                                <?php if (count($childTags) > 2) { ?><span class="gc_tag gc_tag--xs gc_tag--more">+<?= count($childTags) - 2 ?></span><?php } ?>
+                            </span>
+                            <?php } ?>
+                        </a>
+                        <div class="gc_drive_folder_acts">
+                            <a class="gc_iconbtn" href="folder_download.php?folder=<?= $childId ?>" title="Скачать папку" aria-label="Скачать папку">
+                                <span class="gc_ico gc_ico--download"></span>
+                            </a>
+                            <?php if ($canManageChild) { ?>
+                            <button type="button" class="gc_iconbtn" title="Теги папки" aria-label="Теги папки"
+                                    data-folder-tags="<?= $childId ?>"
+                                    data-folder-name="<?= gc_h($child['name']) ?>"
+                                    data-folder-tag-list="<?= $tagListAttr($childTagRows) ?>">
+                                <span class="gc_ico gc_ico--permission"></span>
+                            </button>
+                            <button type="button" class="gc_iconbtn" title="Редактировать папку" aria-label="Редактировать папку"
+                                    data-folder-edit="<?= $childId ?>" data-folder-name="<?= gc_h($child['name']) ?>">
+                                <span class="gc_ico gc_ico--rename"></span>
+                            </button>
+                            <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($child['name']) ?>»? Файлы из неё перейдут в корень.">
+                                <?= gc_csrf_field() ?>
+                                <input type="hidden" name="action" value="folder_delete">
+                                <input type="hidden" name="id" value="<?= $childId ?>">
+                                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                                <button type="submit" class="gc_iconbtn gc_iconbtn--danger" title="Удалить папку" aria-label="Удалить папку">
+                                    <span class="gc_ico gc_ico--delete"></span>
+                                </button>
+                            </form>
+                            <?php } ?>
+                        </div>
+                    </div>
+                    <?php } ?>
+                </div>
+            </section>
+            <?php } ?>
+
+            <section class="gc_drive_section">
+                <div class="gc_drive_section_head">
+                    <h2>Файлы</h2>
+                    <span class="gc_badge"><?= count($files) ?></span>
+                    <?php if ($childFolders !== []) { ?>
+                    <span class="gc_drive_hint">Перетащите файл на папку, чтобы переместить</span>
+                    <?php } ?>
+                </div>
+
+                <div class="gc_drive_grid" data-drive-grid>
+                    <?php foreach ($files as $file) {
+                        $fileId = (int) $file['id'];
+                        $isPinned = (bool) $file['is_pinned'];
+                        $isOwner = (int) $file['uploader_id'] === $uid;
+                        $tags = $fileTags[$fileId] ?? [];
+                        $hasDirect = isset($directAccess[$fileId]);
+                        $hasTag = false;
+                        foreach ($tags as $tagName) {
+                            if (isset($userTagSet[$tagName])) {
+                                $hasTag = true;
+                                break;
+                            }
+                        }
+                        $canDownload = $isOwner || $hasDirect || $hasTag;
+                        $canDelete = $isOwner || $canDeleteAny;
+                        $canMove = $isOwner || $canEditAny;
+                        $canManageFile = $isOwner || $canEditAny || gc_is_admin();
+                        $accessLabel = $isOwner ? 'Мой файл' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр')));
+                        $accessTone = $isOwner ? 'accent' : ($hasDirect ? 'info' : 'violet');
+                        ?>
+                    <article class="gc_drive_tile<?= $isPinned ? ' is-pinned' : '' ?>" data-file-card data-file-id="<?= $fileId ?>" draggable="<?= $canMove ? 'true' : 'false' ?>" data-file-name="<?= gc_h($file['original_name']) ?>">
+                        <?php if ($isPinned) { ?><span class="gc_drive_pin" title="Закреплён"><span class="gc_ico gc_ico--pin"></span></span><?php } ?>
+                        <?php if ($canDownload) { ?>
+                        <a class="gc_drive_open" href="download.php?id=<?= $fileId ?>" title="Скачать" draggable="false">
+                        <?php } else { ?>
+                        <span class="gc_drive_open is-locked" title="Файл виден, но скачивание не разрешено">
+                        <?php } ?>
+                            <span class="gc_drive_fileicon"><span class="gc_ico gc_ico--file"></span><b><?= gc_h(gc_ext_label((string) $file['original_name'])) ?></b></span>
+                            <span class="gc_drive_name"><?= gc_h($file['original_name']) ?></span>
+                            <span class="gc_drive_meta"><?= gc_h(gc_size((int) $file['file_size'])) ?> · <?= gc_h(gc_dt($file['uploaded_at'], 'd.m.Y')) ?></span>
+                        <?php if ($canDownload) { ?></a><?php } else { ?></span><?php } ?>
+
+                        <div class="gc_drive_tags">
+                            <span class="gc_tag gc_tag--xs gc_tag--<?= gc_h($accessTone) ?>"><?= gc_h($accessLabel) ?></span>
+                            <?php foreach (array_slice($tags, 0, 2) as $tagName) { ?>
+                            <span class="gc_tag gc_tag--xs"><?= gc_h($tagName) ?></span>
+                            <?php } ?>
+                            <?php if (count($tags) > 2) { ?>
+                            <span class="gc_tag gc_tag--xs gc_tag--more" title="<?= gc_h(implode(', ', $tags)) ?>">+<?= count($tags) - 2 ?></span>
+                            <?php } ?>
+                        </div>
+
+                        <div class="gc_drive_tileacts">
+                            <?php if ($canDownload) { ?>
+                            <a class="gc_iconbtn" href="download.php?id=<?= $fileId ?>" title="Скачать" aria-label="Скачать"><span class="gc_ico gc_ico--download"></span></a>
+                            <?php } ?>
+                            <?php if ($canManageFile) { ?>
+                            <button type="button" class="gc_iconbtn" title="Теги файла" aria-label="Теги файла"
+                                    data-file-tags="<?= $fileId ?>"
+                                    data-file-name="<?= gc_h($file['original_name']) ?>"
+                                    data-file-tag-list="<?= $tagListAttr($fileTagRowsById[$fileId] ?? []) ?>">
+                                <span class="gc_ico gc_ico--permission"></span>
+                            </button>
+                            <?php } ?>
+                            <?php if ($canPin) { ?>
+                            <form method="post" action="storage.php">
+                                <?= gc_csrf_field() ?>
+                                <input type="hidden" name="action" value="file_pin">
+                                <input type="hidden" name="id" value="<?= $fileId ?>">
+                                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                                <button type="submit" class="gc_iconbtn<?= $isPinned ? ' is-active' : '' ?>" title="<?= $isPinned ? 'Открепить' : 'Закрепить' ?>" aria-label="<?= $isPinned ? 'Открепить' : 'Закрепить' ?>"><span class="gc_ico gc_ico--pin"></span></button>
+                            </form>
+                            <?php } ?>
+                            <?php if ($canDelete) { ?>
+                            <form method="post" action="storage.php" data-confirm="Удалить файл «<?= gc_h($file['original_name']) ?>» безвозвратно?">
+                                <?= gc_csrf_field() ?>
+                                <input type="hidden" name="action" value="file_delete">
+                                <input type="hidden" name="id" value="<?= $fileId ?>">
+                                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                                <button type="submit" class="gc_iconbtn gc_iconbtn--danger" title="Удалить" aria-label="Удалить"><span class="gc_ico gc_ico--delete"></span></button>
+                            </form>
+                            <?php } ?>
+                        </div>
+                    </article>
+                    <?php } ?>
+                </div>
+
+                <div class="gc_filetable" data-drive-list>
+                    <div class="gc_files_head">
+                        <span>Файл</span>
+                        <span>Доступ и теги</span>
+                        <span>Размер</span>
+                        <span>Дата</span>
+                        <span class="is-right">Действия</span>
+                    </div>
+
+                    <?php foreach ($files as $file) {
+                        $fileId = (int) $file['id'];
+                        $isPinned = (bool) $file['is_pinned'];
+                        $isOwner = (int) $file['uploader_id'] === $uid;
+                        $tags = $fileTags[$fileId] ?? [];
+                        $hasDirect = isset($directAccess[$fileId]);
+                        $hasTag = false;
+                        foreach ($tags as $tagName) {
+                            if (isset($userTagSet[$tagName])) {
+                                $hasTag = true;
+                                break;
+                            }
+                        }
+                        $canDownload = $isOwner || $hasDirect || $hasTag;
+                        $canDelete = $isOwner || $canDeleteAny;
+                        $canMove = $isOwner || $canEditAny;
+                        $canManageFile = $isOwner || $canEditAny || gc_is_admin();
+                        $accessLabel = $isOwner ? 'Мой файл' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр')));
+                        $accessTone = $isOwner ? 'accent' : ($hasDirect ? 'info' : 'violet');
+                        ?>
+                    <div class="gc_filerow<?= $isPinned ? ' is-pinned' : '' ?>" data-file-id="<?= $fileId ?>" draggable="<?= $canMove ? 'true' : 'false' ?>" data-file-name="<?= gc_h($file['original_name']) ?>">
+                        <div class="gc_cell--name">
+                            <span class="gc_fileicon">
+                                <span class="gc_ico gc_ico--file"></span>
+                                <b><?= gc_h(gc_ext_label((string) $file['original_name'])) ?></b>
+                            </span>
+                            <div class="gc_filemain">
+                                <?php if ($canDownload) { ?>
+                                <a class="gc_filename" href="download.php?id=<?= $fileId ?>" title="Скачать" draggable="false"><?= gc_h($file['original_name']) ?></a>
+                                <?php } else { ?>
+                                <span class="gc_filename is-locked" title="Файл виден, но скачивание не разрешено"><?= gc_h($file['original_name']) ?></span>
+                                <?php } ?>
+                                <div class="gc_filemeta">
+                                    <span><span class="gc_ico gc_ico--user"></span> <?= gc_h($file['uploader']) ?></span>
+                                    <?php if ($isPinned) { ?><span><span class="gc_ico gc_ico--pin"></span> закреплён</span><?php } ?>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="gc_cell--tags">
+                            <span class="gc_tag gc_tag--xs gc_tag--<?= gc_h($accessTone) ?>"><?= gc_h($accessLabel) ?></span>
+                            <?php foreach (array_slice($tags, 0, 2) as $tagName) { ?>
+                            <span class="gc_tag gc_tag--xs"><?= gc_h($tagName) ?></span>
+                            <?php } ?>
+                            <?php if (count($tags) > 2) { ?>
+                            <span class="gc_tag gc_tag--xs gc_tag--more" title="<?= gc_h(implode(', ', $tags)) ?>">+<?= count($tags) - 2 ?></span>
+                            <?php } ?>
+                        </div>
+
+                        <div class="gc_cell--size"><?= gc_h(gc_size((int) $file['file_size'])) ?></div>
+                        <div class="gc_cell--date"><?= gc_h(gc_dt($file['uploaded_at'])) ?></div>
+
+                        <div class="gc_cell--acts">
+                            <?php if ($canDownload) { ?>
+                            <a class="gc_iconbtn" href="download.php?id=<?= $fileId ?>" title="Скачать" aria-label="Скачать">
+                                <span class="gc_ico gc_ico--download"></span>
+                            </a>
+                            <?php } else { ?>
+                            <span class="gc_iconbtn" title="Скачивание недоступно" aria-label="Скачивание недоступно">
+                                <span class="gc_ico gc_ico--permission"></span>
+                            </span>
+                            <?php } ?>
+
+                            <?php if ($canManageFile) { ?>
+                            <button type="button" class="gc_iconbtn" title="Теги файла" aria-label="Теги файла"
+                                    data-file-tags="<?= $fileId ?>"
+                                    data-file-name="<?= gc_h($file['original_name']) ?>"
+                                    data-file-tag-list="<?= $tagListAttr($fileTagRowsById[$fileId] ?? []) ?>">
+                                <span class="gc_ico gc_ico--permission"></span>
+                            </button>
+                            <?php } ?>
+
+                            <?php if ($canPin) { ?>
+                            <form method="post" action="storage.php">
+                                <?= gc_csrf_field() ?>
+                                <input type="hidden" name="action" value="file_pin">
+                                <input type="hidden" name="id" value="<?= $fileId ?>">
+                                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                                <button type="submit" class="gc_iconbtn<?= $isPinned ? ' is-active' : '' ?>" title="<?= $isPinned ? 'Открепить' : 'Закрепить' ?>" aria-label="<?= $isPinned ? 'Открепить' : 'Закрепить' ?>">
+                                    <span class="gc_ico gc_ico--pin"></span>
+                                </button>
+                            </form>
+                            <?php } ?>
+
+                            <?php if ($canDelete) { ?>
+                            <form method="post" action="storage.php" data-confirm="Удалить файл «<?= gc_h($file['original_name']) ?>» безвозвратно?">
+                                <?= gc_csrf_field() ?>
+                                <input type="hidden" name="action" value="file_delete">
+                                <input type="hidden" name="id" value="<?= $fileId ?>">
+                                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                                <button type="submit" class="gc_iconbtn gc_iconbtn--danger" title="Удалить" aria-label="Удалить">
+                                    <span class="gc_ico gc_ico--delete"></span>
+                                </button>
+                            </form>
+                            <?php } ?>
+                        </div>
+                    </div>
+                    <?php } ?>
+                </div>
+
+                <?php if ($files === []) { ?>
+                <div class="gc_empty" data-file-empty data-server-empty>
+                    <span class="gc_ico gc_ico--folder"></span>
+                    <h3 data-empty-title data-empty-default="В этой папке пусто">В этой папке пусто</h3>
+                    <p><?= $childFolders === [] ? 'Загрузите первый файл или создайте папку.' : 'Внутри этой папки пока нет файлов.' ?></p>
+                </div>
+                <?php } else { ?>
+                <div class="gc_empty" data-file-empty hidden>
+                    <span class="gc_ico gc_ico--search"></span>
+                    <h3 data-empty-title data-empty-default="Ничего не найдено">Ничего не найдено</h3>
+                    <p>Попробуйте другое имя или очистите поиск.</p>
+                </div>
+                <?php } ?>
+            </section>
+        </div>
+    </div>
+
+    <form method="post" action="storage.php" id="gcMoveForm" hidden>
+        <?= gc_csrf_field() ?>
+        <input type="hidden" name="action" value="file_move">
+        <input type="hidden" name="id" value="">
+        <input type="hidden" name="target_folder" value="">
+        <input type="hidden" name="folder" value="<?= $folderId ?>">
+        <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+        <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+        <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+    </form>
+
+    <dialog class="gc_modal" id="gcFolderTagsDialog">
+        <div class="gc_modal_panel">
+            <div class="gc_modal_head">
+                <div>
+                    <span class="gc_modal_eyebrow">Папка</span>
+                    <h2 data-folder-title>Теги папки</h2>
+                </div>
+                <button type="button" class="gc_iconbtn" data-close-dialog title="Закрыть" aria-label="Закрыть">
+                    <span class="gc_ico gc_ico--close"></span>
+                </button>
+            </div>
+            <p class="gc_modal_lead">Папку видят только пользователи с одним из её тегов. На файлы внутри теги папки не влияют, пока вы не синхронизируете их.</p>
+            <div class="gc_modal_tags" data-folder-current></div>
+            <?php if ($allTags !== []) { ?>
+            <form method="post" action="storage.php" class="gc_modal_form">
+                <?= gc_csrf_field() ?>
+                <input type="hidden" name="action" value="folder_tag_add">
+                <input type="hidden" name="id" value="" data-folder-id>
+                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                <div class="gc_field">
+                    <label class="gc_label" for="folderTagSelect">Добавить тег</label>
+                    <select class="gc_select" id="folderTagSelect" name="tag_id" required>
+                        <option value="">Выберите тег</option>
+                        <?php foreach ($allTags as $tagRow) { ?>
+                        <option value="<?= (int) $tagRow['id'] ?>"><?= gc_h($tagRow['name']) ?></option>
+                        <?php } ?>
+                    </select>
+                </div>
+                <button type="submit" class="gc_btn gc_btn--primary">Добавить</button>
+            </form>
+            <?php } ?>
+            <div class="gc_modal_actions">
+                <form method="post" action="storage.php" data-confirm="Выдать всем файлам в этой папке и её подпапках теги папки?">
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="folder_tags_sync">
+                    <input type="hidden" name="id" value="" data-folder-id>
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                    <button type="submit" class="gc_btn gc_btn--outline">
+                        <span class="gc_ico gc_ico--permission"></span> Синхронизировать с файлами
+                    </button>
+                </form>
+                <form method="post" action="storage.php" id="gcFolderTagRemoveForm">
+                    <?= gc_csrf_field() ?>
+                    <input type="hidden" name="action" value="folder_tag_delete">
+                    <input type="hidden" name="id" value="" data-folder-id>
+                    <input type="hidden" name="tag_id" value="">
+                    <input type="hidden" name="folder" value="<?= $folderId ?>">
+                    <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                    <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                    <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                </form>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog class="gc_modal" id="gcFileTagsDialog">
+        <div class="gc_modal_panel">
+            <div class="gc_modal_head">
+                <div>
+                    <span class="gc_modal_eyebrow">Файл</span>
+                    <h2 data-file-title>Теги файла</h2>
+                </div>
+                <button type="button" class="gc_iconbtn" data-close-dialog title="Закрыть" aria-label="Закрыть">
+                    <span class="gc_ico gc_ico--close"></span>
+                </button>
+            </div>
+            <p class="gc_modal_lead">Теги файла определяют, кто видит и может скачать файл. Синхронизации здесь нет.</p>
+            <div class="gc_modal_tags" data-file-current></div>
+            <?php if ($allTags !== []) { ?>
+            <form method="post" action="storage.php" class="gc_modal_form">
+                <?= gc_csrf_field() ?>
+                <input type="hidden" name="action" value="file_tag_add">
+                <input type="hidden" name="id" value="" data-file-id>
+                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                <div class="gc_field">
+                    <label class="gc_label" for="fileTagSelect">Добавить тег</label>
+                    <select class="gc_select" id="fileTagSelect" name="tag_id" required>
+                        <option value="">Выберите тег</option>
+                        <?php foreach ($allTags as $tagRow) { ?>
+                        <option value="<?= (int) $tagRow['id'] ?>"><?= gc_h($tagRow['name']) ?></option>
+                        <?php } ?>
+                    </select>
+                </div>
+                <button type="submit" class="gc_btn gc_btn--primary">Добавить</button>
+            </form>
+            <?php } ?>
+            <form method="post" action="storage.php" id="gcFileTagRemoveForm">
+                <?= gc_csrf_field() ?>
+                <input type="hidden" name="action" value="file_tag_delete">
+                <input type="hidden" name="id" value="" data-file-id>
+                <input type="hidden" name="tag_id" value="">
+                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+            </form>
+        </div>
+    </dialog>
+
+    <dialog class="gc_modal" id="gcFolderEditDialog">
+        <div class="gc_modal_panel">
+            <div class="gc_modal_head">
+                <div>
+                    <span class="gc_modal_eyebrow">Папка</span>
+                    <h2>Редактировать папку</h2>
+                </div>
+                <button type="button" class="gc_iconbtn" data-close-dialog title="Закрыть" aria-label="Закрыть">
+                    <span class="gc_ico gc_ico--close"></span>
+                </button>
+            </div>
+            <form method="post" action="storage.php" class="gc_modal_form gc_modal_form--stack">
+                <?= gc_csrf_field() ?>
+                <input type="hidden" name="action" value="folder_rename">
+                <input type="hidden" name="id" value="" data-folder-id>
+                <input type="hidden" name="folder" value="<?= $folderId ?>">
+                <input type="hidden" name="sort" value="<?= gc_h($sort) ?>">
+                <input type="hidden" name="dir" value="<?= gc_h($dir) ?>">
+                <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
+                <div class="gc_field">
+                    <label class="gc_label" for="folderEditName">Название</label>
+                    <input class="gc_input" id="folderEditName" type="text" name="folder_name" maxlength="80" required data-folder-name-input>
+                </div>
+                <button type="submit" class="gc_btn gc_btn--primary">Сохранить</button>
+            </form>
+        </div>
+    </dialog>
+</div>
+<?php gc_foot(); ?>

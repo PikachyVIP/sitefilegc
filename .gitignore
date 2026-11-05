@@ -1,0 +1,22 @@
+# Local agent tooling and project documentation: not part of the public site
+.claude/
+docs/
+deploy/
+.githooks/
+
+# Data of the storage: lives on the server that serves the site, never in the repository
+uploads/
+updates/
+
+# Database connection settings: an INI outside the repository, path in GC_DB_CONFIG
+configfile.ini
+
+# OS and editor noise
+Thumbs.db
+.DS_Store
+*.log
+
+# Python bytecode of the hooks
+__pycache__/
+*.pyc
+CLAUDE.md

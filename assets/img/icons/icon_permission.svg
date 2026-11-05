@@ -1,0 +1,23 @@
+<svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M9.99945 0C7.58339 4.516 6.18644 5.84906 0.0004586 6C-0.0525369 18.064 4.4849 22.7469 14.9989 30C26.6111 23.2091 30.1107 17.9947 29.9974 6C23.9129 5.63384 22.5521 4.24899 19.9984 0H15.9988H13.999H9.99945Z" fill="url(#perm_g0)"/>
+<path d="M30 6C30.029 18.1482 26.4398 23.2553 15 30V0H20C22.3792 4.5282 24.6089 5.78253 30 6Z" fill="url(#perm_g1)"/>
+<path d="M14 0H16L15 30L14 0Z" fill="url(#perm_g2)"/>
+<path d="M12.55 15.1V12.6C12.55 11.244 13.649 10.145 15.005 10.145C16.361 10.145 17.46 11.244 17.46 12.6V15.1" stroke="#242557" stroke-width="1.4" stroke-linecap="round"/>
+<rect x="10.35" y="15.05" width="9.3" height="7.1" rx="1.5" fill="#242557"/>
+<circle cx="15" cy="18.05" r="1.15" fill="#F7D576"/>
+<rect x="14.45" y="18.35" width="1.1" height="2.05" rx="0.55" fill="#F7D576"/>
+<defs>
+<linearGradient id="perm_g0" x1="23.998" y1="3" x2="7.49748" y2="25.4984" gradientUnits="userSpaceOnUse">
+<stop stop-color="#F7D576"/>
+<stop offset="0.942308" stop-color="#CC6F67"/>
+</linearGradient>
+<linearGradient id="perm_g1" x1="28.5" y1="-0.500001" x2="8.5" y2="37.5" gradientUnits="userSpaceOnUse">
+<stop stop-color="#CA6D66"/>
+<stop offset="1" stop-color="#F6D576"/>
+</linearGradient>
+<linearGradient id="perm_g2" x1="15" y1="0" x2="15" y2="30" gradientUnits="userSpaceOnUse">
+<stop stop-color="#F7D576"/>
+<stop offset="1" stop-color="#CD7267"/>
+</linearGradient>
+</defs>
+</svg>

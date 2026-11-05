@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: gc_files
+          POSTGRES_USER: gc_files
+          POSTGRES_PASSWORD: gc_files
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gc_files"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      GC_DB_CONFIG: /tmp/gc-db.ini
+      GC_BASE_URL: http://127.0.0.1:8099
+      PGPASSWORD: gc_files
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_pgsql, pgsql, mbstring, fileinfo
+          coverage: none
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Lint every PHP file
+        run: |
+          find . -name '*.php' -not -path './.git/*' -print0 \
+            | xargs -0 -n1 php -l
+
+      - name: Create database config
+        run: |
+          cat > "$GC_DB_CONFIG" <<'INI'
+          [gc_database_api]
+          host = 127.0.0.1
+          port = 5432
+          database = gc_files
+          user_name = gc_files
+          user_password = gc_files
+          update_base_url = http://127.0.0.1:8099
+          INI
+
+      - name: Apply schema and seed test admin
+        run: |
+          psql -h 127.0.0.1 -U gc_files -d gc_files -v ON_ERROR_STOP=1 -f schema.sql
+          hash="$(php -r 'echo password_hash("CiPass12345", PASSWORD_DEFAULT);')"
+          psql -h 127.0.0.1 -U gc_files -d gc_files -v ON_ERROR_STOP=1 <<SQL
+          INSERT INTO users (id, login, password) VALUES (1, 'admin', '$hash');
+          SELECT setval(pg_get_serial_sequence('users', 'id'), 1, true);
+          SQL
+
+      - name: Start PHP server
+        run: |
+          php -S 127.0.0.1:8099 -t . > "$RUNNER_TEMP/php-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/php-server.pid"
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8099/login.php > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PHP server did not start" >&2
+          cat "$RUNNER_TEMP/php-server.log" >&2
+          exit 1
+
+      - name: Smoke test
+        run: bash tests/smoke.sh
+
+      - name: Upload PHP server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-server-log
+          path: ${{ runner.temp }}/php-server.log
+          if-no-files-found: ignore
+
+      - name: Stop PHP server
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/php-server.pid")" 2>/dev/null || true
