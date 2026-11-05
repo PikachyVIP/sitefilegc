@@ -777,6 +777,119 @@
         });
     }
 
+    /* ---------- read-only file preview ---------- */
+
+    function initPreviewDialog() {
+        var dialog = document.getElementById('gcPreviewDialog');
+        if (!dialog) return;
+        var body = dialog.querySelector('[data-preview-body]');
+        var title = dialog.querySelector('[data-preview-title]');
+        var note = dialog.querySelector('[data-preview-note]');
+        var download = dialog.querySelector('[data-preview-download]');
+        var close = dialog.querySelector('[data-preview-close]');
+        var controller = null;
+
+        function cleanup() {
+            if (controller) {
+                controller.abort();
+                controller = null;
+            }
+            if (body) {
+                $$('video', body).forEach(function (video) {
+                    video.pause();
+                    video.removeAttribute('src');
+                    video.load();
+                });
+                body.innerHTML = '';
+            }
+        }
+
+        function finish() {
+            cleanup();
+        }
+
+        function closeDialog() {
+            if (dialog.open) dialog.close();
+        }
+
+        function showMessage(text) {
+            if (!body) return;
+            body.innerHTML = '';
+            var message = document.createElement('p');
+            message.className = 'gc_muted';
+            message.textContent = text;
+            body.appendChild(message);
+        }
+
+        function openPreview(button) {
+            var id = button.getAttribute('data-file-preview');
+            var kind = button.getAttribute('data-preview-kind') || '';
+            var name = button.getAttribute('data-file-name') || 'Файл';
+            if (!id || !body) return;
+
+            cleanup();
+            if (title) title.textContent = name;
+            if (note) note.textContent = '';
+            if (download) download.setAttribute('href', button.getAttribute('data-preview-download') || ('download.php?id=' + id));
+            var url = 'preview.php?id=' + encodeURIComponent(id);
+
+            if (kind === 'image') {
+                var image = document.createElement('img');
+                image.className = 'gc_preview_image';
+                image.alt = name;
+                image.src = url;
+                body.appendChild(image);
+                if (note) note.textContent = 'Только просмотр';
+            } else if (kind === 'video') {
+                var video = document.createElement('video');
+                video.className = 'gc_preview_video';
+                video.controls = true;
+                video.playsInline = true;
+                video.preload = 'metadata';
+                video.src = url;
+                body.appendChild(video);
+                if (note) note.textContent = 'Только просмотр';
+            } else if (kind === 'text') {
+                showMessage('Загрузка…');
+                controller = new AbortController();
+                fetch(url, { credentials: 'same-origin', signal: controller.signal })
+                    .then(function (response) {
+                        if (!response.ok) throw new Error('Не удалось открыть файл');
+                        var truncated = response.headers.get('X-GC-Preview-Truncated') === '1';
+                        return response.text().then(function (text) {
+                            return { text: text, truncated: truncated };
+                        });
+                    })
+                    .then(function (result) {
+                        if (!body) return;
+                        body.innerHTML = '';
+                        var pre = document.createElement('pre');
+                        pre.className = 'gc_preview_text';
+                        pre.textContent = result.text;
+                        body.appendChild(pre);
+                        if (note) note.textContent = result.truncated ? 'Показаны первые 2 МБ' : 'Только просмотр';
+                    })
+                    .catch(function (error) {
+                        if (error && error.name === 'AbortError') return;
+                        showMessage('Не удалось открыть файл для просмотра.');
+                    });
+            } else {
+                showMessage('Этот формат нельзя открыть для просмотра.');
+            }
+
+            dialog.showModal();
+        }
+
+        dialog.addEventListener('click', function (event) {
+            if (event.target === dialog) closeDialog();
+        });
+        dialog.addEventListener('close', finish);
+        if (close) close.addEventListener('click', closeDialog);
+        $$('[data-file-preview]').forEach(function (button) {
+            button.addEventListener('click', function () { openPreview(button); });
+        });
+    }
+
     /* ---------- boot ---------- */
 
     function boot() {
@@ -793,6 +906,7 @@
         initViewToggle();
         initFileDrag();
         initTagDialogs();
+        initPreviewDialog();
         initUploadProgress();
     }
 

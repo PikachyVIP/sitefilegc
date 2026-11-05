@@ -2829,6 +2829,33 @@ dialog.gc_modal {
     box-shadow: 0 28px 80px rgba(0, 0, 0, .55);
 }
 dialog.gc_modal::backdrop { background: rgba(4, 2, 15, .74); backdrop-filter: blur(4px); }
+dialog.gc_preview_modal { width: min(980px, calc(100vw - 24px)); }
+.gc_preview_panel { display: flex; flex-direction: column; max-height: calc(100vh - 40px); }
+.gc_preview_body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+    margin-top: 16px;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid var(--gc_border-1);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, .22);
+}
+.gc_preview_image,
+.gc_preview_video { display: block; max-width: 100%; max-height: 68vh; border-radius: 8px; }
+.gc_preview_text {
+    width: 100%;
+    max-height: 64vh;
+    margin: 0;
+    overflow: auto;
+    color: var(--gc_text);
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.gc_preview_foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; }
 .gc_modal_panel { padding: 22px; }
 .gc_modal_head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .gc_modal_head h2 { margin: 2px 0 0; font-size: 19px; }

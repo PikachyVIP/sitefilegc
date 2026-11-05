@@ -5,6 +5,7 @@ require_once __DIR__ . '/layout.php';
 
 $user = gc_require_login();
 $uid = (int) $user['id'];
+$superadmin = gc_is_superadmin();
 $folderId = isset($_GET['folder']) ? (int) $_GET['folder'] : 0;
 
 if ($folderId <= 0) {
@@ -49,12 +50,12 @@ if (isset($user['tags']) && is_array($user['tags'])) {
 }
 $viewAll = gc_has_right('view_any_file');
 
-$canSeeFolder = static function (int $id) use ($folderMap, $folderTags, $userTagSet, $viewAll, $uid): bool {
+$canSeeFolder = static function (int $id) use ($folderMap, $folderTags, $userTagSet, $viewAll, $uid, $superadmin): bool {
     if (!isset($folderMap[$id])) {
         return false;
     }
     if (!empty($folderMap[$id]['is_personal'])) {
-        return (int) $folderMap[$id]['created_by'] === $uid;
+        return $superadmin || (int) $folderMap[$id]['created_by'] === $uid;
     }
     if ((int) $folderMap[$id]['created_by'] === $uid || $viewAll) {
         return true;
@@ -104,7 +105,14 @@ $walk($folderId);
 $ids = array_keys($scopeFolders);
 $in = implode(',', array_fill(0, count($ids), '?'));
 $personalDownload = !empty($folderMap[$folderId]['is_personal']);
-if ($personalDownload) {
+if ($personalDownload && $superadmin) {
+    $statement = $pdo->prepare(
+        'SELECT DISTINCT f.id, f.filename, f.original_name, f.folder_id FROM files f'
+        . ' WHERE f.folder_id IN (' . $in . ')'
+        . ' ORDER BY f.original_name'
+    );
+    $statement->execute($ids);
+} elseif ($personalDownload) {
     $statement = $pdo->prepare(
         'SELECT DISTINCT f.id, f.filename, f.original_name, f.folder_id FROM files f'
         . ' WHERE f.folder_id IN (' . $in . ') AND f.uploader_id = ?'

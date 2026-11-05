@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/session.php';
-require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/bootstrap.php';
 
 if (!isset($_SESSION['user'])) {
     header('Location: index.php');
@@ -27,31 +26,7 @@ if (!is_array($file)) {
     exit('Файл не найден');
 }
 
-$is_personal_file = (bool) ($file['is_personal'] ?? false);
-if ($is_personal_file && ((int) $file['uploader_id'] !== $user_id || (int) $file['folder_owner'] !== $user_id)) {
-    http_response_code(403);
-    exit('Нет доступа к файлу');
-}
-
-$can_download = (int) $file['uploader_id'] === $user_id;
-
-if (!$can_download) {
-    $stmt = $pdo->prepare('SELECT 1 FROM file_access WHERE file_id = ? AND user_id = ?');
-    $stmt->execute([$file_id, $user_id]);
-    $can_download = (bool) $stmt->fetch();
-}
-
-if (!$can_download && $user_tags !== []) {
-    $placeholders = implode(',', array_fill(0, count($user_tags), '?'));
-    $stmt = $pdo->prepare(
-        "SELECT 1 FROM file_tags ft JOIN tags t ON ft.tag_id = t.id
-          WHERE ft.file_id = ? AND t.name IN ({$placeholders})"
-    );
-    $stmt->execute(array_merge([$file_id], $user_tags));
-    $can_download = (bool) $stmt->fetch();
-}
-
-if (!$can_download) {
+if (!gc_file_readable($pdo, $file, $user_id)) {
     http_response_code(403);
     exit('Нет доступа к файлу');
 }

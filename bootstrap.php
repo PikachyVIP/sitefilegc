@@ -11,7 +11,7 @@ require_once __DIR__ . '/session.php';
 
 const GC_APP_NAME = 'GC Files';
 const GC_APP_VERSION = '2.2.0';
-const GC_ASSET_VERSION = '2.2.12';
+const GC_ASSET_VERSION = '2.2.13';
 
 // Hard ceiling for every uploaded file, independent of php.ini. 20 GiB.
 const GC_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
@@ -136,6 +136,106 @@ function gc_is_admin(): bool
     return $user['id'] === 1
         || $user['is_admin']
         || in_array('admin_panel', $user['rights'], true);
+}
+
+/**
+ * The first account is the only one allowed to read another user's personal
+ * files. Other administrators keep the ordinary privacy boundary.
+ */
+function gc_is_superadmin(): bool
+{
+    $user = gc_user();
+
+    return $user !== null && $user['id'] === 1;
+}
+
+/**
+ * Whether a file row may be read by the given account. The row must carry
+ * uploader_id and, for a personal file, is_personal plus folder_owner.
+ */
+function gc_file_readable(PDO $pdo, array $file, int $userId): bool
+{
+    if ($userId === 1) {
+        return true;
+    }
+
+    $personal = gc_bool_value($file['is_personal'] ?? false);
+    if ($personal
+        && ((int) ($file['uploader_id'] ?? 0) !== $userId
+            || (int) ($file['folder_owner'] ?? 0) !== $userId)
+    ) {
+        return false;
+    }
+
+    if ((int) ($file['uploader_id'] ?? 0) === $userId) {
+        return true;
+    }
+
+    $stmt = $pdo->prepare('SELECT 1 FROM file_access WHERE file_id = ? AND user_id = ?');
+    $stmt->execute([(int) ($file['id'] ?? 0), $userId]);
+    if ($stmt->fetchColumn()) {
+        return true;
+    }
+
+    $tags = $_SESSION['tags'] ?? [];
+    if (is_array($tags) && $tags !== []) {
+        $placeholders = implode(',', array_fill(0, count($tags), '?'));
+        $stmt = $pdo->prepare(
+            "SELECT 1 FROM file_tags ft JOIN tags t ON ft.tag_id = t.id
+              WHERE ft.file_id = ? AND t.name IN ({$placeholders})"
+        );
+        $stmt->execute(array_merge([(int) ($file['id'] ?? 0)], array_values($tags)));
+
+        return (bool) $stmt->fetchColumn();
+    }
+
+    return false;
+}
+
+/**
+ * Preview kind for a file, based on its stored MIME type and, as a fallback,
+ * its extension. Only these kinds are served inline.
+ */
+function gc_preview_kind(?string $mime, string $name = ''): string
+{
+    $mime = strtolower(trim(explode(';', (string) $mime)[0]));
+    if (in_array($mime, ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'], true)) {
+        return 'image';
+    }
+    if (in_array($mime, ['video/mp4', 'video/webm', 'video/ogg'], true)) {
+        return 'video';
+    }
+    if (str_starts_with($mime, 'text/')
+        || in_array($mime, [
+            'application/json',
+            'application/xml',
+            'application/javascript',
+            'application/x-javascript',
+            'application/x-yaml',
+            'application/x-sh',
+            'application/sql',
+            'application/csv',
+        ], true)
+    ) {
+        return 'text';
+    }
+
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'], true)) {
+        return 'image';
+    }
+    if (in_array($ext, ['mp4', 'webm', 'ogv', 'ogg'], true)) {
+        return 'video';
+    }
+    if (in_array($ext, [
+        'txt', 'md', 'csv', 'json', 'xml', 'log', 'ini', 'conf', 'yaml', 'yml',
+        'html', 'htm', 'css', 'js', 'ts', 'php', 'sql', 'sh', 'py', 'rb', 'go',
+        'rs', 'java', 'c', 'h', 'cpp', 'hpp',
+    ], true)) {
+        return 'text';
+    }
+
+    return '';
 }
 
 /**

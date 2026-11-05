@@ -5,6 +5,7 @@ require_once __DIR__ . '/layout.php';
 
 $user = gc_require_login();
 $uid = (int) $user['id'];
+$isSuperadmin = gc_is_superadmin();
 $uploadDir = __DIR__ . '/uploads';
 
 $folderId = isset($_GET['folder']) ? (int) $_GET['folder'] : 0;
@@ -20,6 +21,7 @@ if ($scope === 'mine') {
     $scope = 'all';
 }
 
+$adminPersonal = $isSuperadmin && $scope === 'personal';
 $personalRootId = gc_personal_folder_id($pdo, $uid);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -340,6 +342,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $folderRow = $statement->fetch();
 
         $isPersonalFolder = $folderRow && gc_bool_value($folderRow['is_personal']);
+        if ($isPersonalFolder && (int) ($folderRow['parent_id'] ?? 0) === 0) {
+            gc_flash('error', 'Личную папку нельзя переименовать.');
+            gc_redirect($returnUrl);
+        }
         $allowed = $folderRow && ($isPersonalFolder
             ? (int) $folderRow['created_by'] === $uid
             : ((int) $folderRow['created_by'] === $uid || gc_is_admin() || gc_has_right('edit_any_file')));
@@ -614,7 +620,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     gc_redirect($returnUrl);
 }
 
-$folders = $pdo->query('SELECT id, name, parent_id, created_by, is_personal FROM folders ORDER BY lower(name), id')->fetchAll();
+$folders = $pdo->query(
+    'SELECT fo.id, fo.name, fo.parent_id, fo.created_by, fo.is_personal, u.login AS creator_login'
+    . ' FROM folders fo JOIN users u ON u.id = fo.created_by'
+    . ' ORDER BY lower(fo.name), fo.id'
+)->fetchAll();
 $regularMap = [];
 $personalMap = [];
 foreach ($folders as $folderRow) {
@@ -626,9 +636,10 @@ foreach ($folders as $folderRow) {
         'parent_id' => $parent,
         'created_by' => (int) $folderRow['created_by'],
         'is_personal' => gc_bool_value($folderRow['is_personal']),
+        'creator_login' => (string) $folderRow['creator_login'],
     ];
     if ($node['is_personal']) {
-        if ($node['created_by'] === $uid) {
+        if ($adminPersonal || $node['created_by'] === $uid) {
             $personalMap[$id] = $node;
         }
         continue;
@@ -696,7 +707,13 @@ if (!isset($personalMap[$personalRootId])) {
     $personalChildren = [];
 }
 
-if ($scope === 'personal') {
+if ($adminPersonal) {
+    $folderMap = $personalMap;
+    $children = $personalChildren;
+    if ($folderId > 0 && !isset($folderMap[$folderId])) {
+        $folderId = 0;
+    }
+} elseif ($scope === 'personal') {
     $folderMap = $personalMap;
     $children = $personalChildren;
     if ($folderId <= 0 || !isset($folderMap[$folderId])) {
@@ -721,8 +738,10 @@ while ($cursor > 0 && isset($folderMap[$cursor]) && !isset($seen[$cursor])) {
 
 $personalIds = array_keys($personalMap);
 $personalIn = $personalIds !== [] ? implode(',', array_map('intval', $personalIds)) : 'NULL';
-$personalFileSql = ' AND f.uploader_id = ? AND f.folder_id IN (' . $personalIn . ')';
-$personalFileParams = [$uid];
+$personalFileSql = $adminPersonal
+    ? ' AND f.folder_id IN (' . $personalIn . ')'
+    : ' AND f.uploader_id = ? AND f.folder_id IN (' . $personalIn . ')';
+$personalFileParams = $adminPersonal ? [] : [$uid];
 
 $regularIds = array_keys($regularMap);
 $visibleRegularSql = $regularIds !== []
@@ -818,10 +837,15 @@ foreach ($accessStatement->fetchAll(PDO::FETCH_COLUMN) as $fileId) {
 $canPin = gc_has_right('pin_files');
 $canDeleteAny = gc_has_right('delete_any_file');
 $canEditAny = gc_has_right('edit_any_file');
-$canManageCurrent = $folderId > 0
+$isPersonalRootRow = static function (array $folderRow): bool {
+    return gc_bool_value($folderRow['is_personal'] ?? false)
+        && (int) ($folderRow['parent_id'] ?? 0) === 0;
+};
+$canManageCurrent = !$adminPersonal && $folderId > 0
+    && !$isPersonalRootRow($folderMap[$folderId] ?? [])
     && ((int) ($folderMap[$folderId]['created_by'] ?? 0) === $uid || gc_is_admin() || $canEditAny);
 
-$renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope): void {
+$renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope, $adminPersonal): void {
     if (empty($children[$parent])) {
         return;
     }
@@ -831,14 +855,18 @@ $renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $
         $hasChildren = !empty($children[$id]);
         $active = $id === $folderId;
         $count = $folderCounts[$id] ?? 0;
+        $treeLabel = $node['name'];
+        if ($adminPersonal && $node['parent_id'] === 0) {
+            $treeLabel .= ' · ' . $node['creator_login'];
+        }
         echo '<li class="gc_tree_item">';
         echo '<div class="gc_tree_row' . ($active ? ' is-active' : '') . '">';
         echo '<button type="button" class="gc_tree_toggle' . ($hasChildren ? '' : ' is-empty') . '"'
             . ' aria-expanded="true"' . ($hasChildren ? ' aria-controls="tree-' . $id . '"' : '') . '>'
             . '<span class="gc_ico gc_ico--chevron"></span></button>';
-        echo '<a class="gc_tree_link" data-drop-folder="' . $id . '" href="' . gc_h(gc_storage_link($id, $sort, $dir, $scope)) . '" title="' . gc_h($node['name']) . '">';
+        echo '<a class="gc_tree_link" data-drop-folder="' . $id . '" href="' . gc_h(gc_storage_link($id, $sort, $dir, $scope)) . '" title="' . gc_h($treeLabel) . '">';
         echo '<span class="gc_ico gc_ico--folder"></span>';
-        echo '<span class="gc_tree_name">' . gc_h($node['name']) . '</span>';
+        echo '<span class="gc_tree_name">' . gc_h($treeLabel) . '</span>';
         echo '<span class="gc_tree_count">' . $count . '</span>';
         echo '</a></div>';
         if ($hasChildren) {
@@ -851,14 +879,20 @@ $renderTree = function (int $parent) use (&$renderTree, $children, $folderMap, $
     echo '</ul>';
 };
 
-$currentName = $folderId > 0 ? $folderMap[$folderId]['name'] : 'Корень хранилища';
+$currentName = $folderId > 0 ? $folderMap[$folderId]['name'] : ($adminPersonal ? 'Все личные' : 'Корень хранилища');
+if ($adminPersonal && $folderId > 0 && (int) $folderMap[$folderId]['parent_id'] === 0) {
+    $currentName .= ' · ' . $folderMap[$folderId]['creator_login'];
+}
 $maxSizeLabel = gc_size(gc_max_upload());
 $allTags = $pdo->query('SELECT id, name FROM tags ORDER BY name')->fetchAll();
 $tagListAttr = static function (array $rows): string {
     $json = json_encode($rows, JSON_UNESCAPED_UNICODE);
     return gc_h($json === false ? '[]' : $json);
 };
-$canManageFolderRow = static function (array $folderRow) use ($uid, $canEditAny): bool {
+$canManageFolderRow = static function (array $folderRow) use ($uid, $canEditAny, $isPersonalRootRow): bool {
+    if ($isPersonalRootRow($folderRow)) {
+        return false;
+    }
     return (int) $folderRow['created_by'] === $uid || gc_is_admin() || $canEditAny;
 };
 $currentFolderTags = $folderTagRows[$folderId] ?? [];
@@ -879,10 +913,10 @@ $scopeLabels = ['all' => 'Все файлы', 'personal' => 'Личные фай
 $scopeIcons = ['all' => 'folder', 'personal' => 'user'];
 $scopeLinks = [
     'all' => gc_storage_link(0, $sort, $dir, 'all'),
-    'personal' => gc_storage_link($personalRootId, $sort, $dir, 'personal'),
+    'personal' => gc_storage_link($adminPersonal ? 0 : $personalRootId, $sort, $dir, 'personal'),
 ];
-$rootFolderId = $scope === 'personal' ? $personalRootId : 0;
-$rootFolderLabel = $scope === 'personal' ? 'Личные файлы' : 'Корень';
+$rootFolderId = $adminPersonal ? 0 : ($scope === 'personal' ? $personalRootId : 0);
+$rootFolderLabel = $adminPersonal ? 'Все личные' : ($scope === 'personal' ? 'Личные файлы' : 'Корень');
 $roleTags = isset($user['tags']) && is_array($user['tags']) ? array_values($user['tags']) : [];
 $rightLabels = [];
 if (isset($user['rights']) && is_array($user['rights'])) {
@@ -900,7 +934,7 @@ gc_head('Хранилище', 'storage');
         <div>
             <div class="gc_hero_eyebrow">Файлы команды</div>
             <h1 class="gc_h1 gc_drive_title">Хранилище</h1>
-            <p class="gc_drive_lead">Все общие файлы и личные файлы. Личные видит только тот, кто их загрузил.</p>
+            <p class="gc_drive_lead">Все общие файлы и личные файлы. Личные видит только тот, кто их загрузил<?= $adminPersonal ? ', и суперпользователь' : '' ?>.</p>
         </div>
         <div class="gc_drive_stats">
             <div class="gc_hero_stat"><b><?= $totalVisible ?></b><span>файлов в этом виде</span></div>
@@ -940,6 +974,7 @@ gc_head('Хранилище', 'storage');
                 </li>
             </ul>
 
+            <?php if (!$adminPersonal) { ?>
             <details class="gc_tree_new" id="new-folder">
                 <summary><span class="gc_ico gc_ico--plus"></span> Новая папка<?= $folderId > 0 ? ' здесь' : '' ?></summary>
                 <form method="post" action="storage.php">
@@ -981,6 +1016,7 @@ gc_head('Хранилище', 'storage');
                 </form>
                 <?php } ?>
             </details>
+            <?php } ?>
             <?php } ?>
 
             <div class="gc_drive_roles">
@@ -1062,15 +1098,18 @@ gc_head('Хранилище', 'storage');
                         <span class="gc_ico gc_ico--permission"></span> Теги
                     </button>
                     <?php } ?>
+                    <?php if (!$adminPersonal) { ?>
                     <button type="button" class="gc_btn gc_btn--primary" data-open-details="upload">
                         <span class="gc_ico gc_ico--upload"></span> Загрузить
                     </button>
                     <button type="button" class="gc_btn gc_btn--outline" data-open-details="new-folder">
                         <span class="gc_ico gc_ico--plus"></span> Папка
                     </button>
+                    <?php } ?>
                 </div>
             </div>
 
+            <?php if (!$adminPersonal) { ?>
             <details class="gc_upload_panel" id="upload"<?= $files === [] && $childFolders === [] ? ' open' : '' ?>>
                 <summary>
                     <h2>Загрузить файлы и папки</h2>
@@ -1146,6 +1185,7 @@ gc_head('Хранилище', 'storage');
                     </div>
                 </form>
             </details>
+            <?php } ?>
 
             <?php if ($childFolders !== []) { ?>
             <section class="gc_drive_section">
@@ -1159,12 +1199,16 @@ gc_head('Хранилище', 'storage');
                         $childCount = $folderCounts[$childId] ?? 0;
                         $childTagRows = $folderTagRows[$childId] ?? [];
                         $childTags = $folderTags[$childId] ?? [];
-                        $canManageChild = $canManageFolderRow($child);
+                        $canManageChild = !$adminPersonal && $canManageFolderRow($child);
+                        $childLabel = $child['name'];
+                        if ($adminPersonal && $child['parent_id'] === 0) {
+                            $childLabel .= ' · ' . $child['creator_login'];
+                        }
                         ?>
                     <div class="gc_drive_folder" data-drop-folder="<?= $childId ?>">
                         <a class="gc_drive_folder_open" href="<?= gc_h(gc_storage_link($childId, $sort, $dir, $scope)) ?>" draggable="false">
                             <span class="gc_drive_folder_icon"><span class="gc_ico gc_ico--folder"></span></span>
-                            <span class="gc_drive_folder_name"><?= gc_h($child['name']) ?></span>
+                            <span class="gc_drive_folder_name"><?= gc_h($childLabel) ?></span>
                             <span class="gc_drive_folder_meta"><?= $childCount ?> <?= $fileWord($childCount) ?></span>
                             <?php if ($childTags !== []) { ?>
                             <span class="gc_drive_folder_tags">
@@ -1182,12 +1226,12 @@ gc_head('Хранилище', 'storage');
                             <?php if ($canManageChild) { ?>
                             <button type="button" class="gc_iconbtn" title="Теги папки" aria-label="Теги папки"
                                     data-folder-tags="<?= $childId ?>"
-                                    data-folder-name="<?= gc_h($child['name']) ?>"
+                                    data-folder-name="<?= gc_h($childLabel) ?>"
                                     data-folder-tag-list="<?= $tagListAttr($childTagRows) ?>">
                                 <span class="gc_ico gc_ico--permission"></span>
                             </button>
                             <button type="button" class="gc_iconbtn" title="Редактировать папку" aria-label="Редактировать папку"
-                                    data-folder-edit="<?= $childId ?>" data-folder-name="<?= gc_h($child['name']) ?>">
+                                    data-folder-edit="<?= $childId ?>" data-folder-name="<?= gc_h($childLabel) ?>">
                                 <span class="gc_ico gc_ico--rename"></span>
                             </button>
                             <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($child['name']) ?>»? Файлы из неё перейдут в <?= $child['parent_id'] > 0 ? 'родительскую папку' : 'корень' ?>.">
@@ -1233,11 +1277,13 @@ gc_head('Хранилище', 'storage');
                                 break;
                             }
                         }
-                        $canDownload = $isOwner || $hasDirect || $hasTag;
-                        $canDelete = $isOwner || $canDeleteAny;
-                        $canMove = $isOwner || $canEditAny;
-                        $canManageFile = $isOwner || $canEditAny || gc_is_admin();
-                        $accessLabel = $isOwner ? 'Мой файл' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр')));
+                        $canDownload = $isSuperadmin || $isOwner || $hasDirect || $hasTag;
+                        $previewKind = gc_preview_kind((string) ($file['mime_type'] ?? ''), (string) $file['original_name']);
+                        $canPreview = $canDownload && $previewKind !== '';
+                        $canDelete = !$adminPersonal && ($isOwner || $canDeleteAny);
+                        $canMove = !$adminPersonal && ($isOwner || $canEditAny);
+                        $canManageFile = !$adminPersonal && ($isOwner || $canEditAny || gc_is_admin());
+                        $accessLabel = $isOwner ? 'Мой файл' : ($isSuperadmin ? 'Суперпользователь' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр'))));
                         $accessTone = $isOwner ? 'accent' : ($hasDirect ? 'info' : 'violet');
                         ?>
                     <article class="gc_drive_tile<?= $isPinned ? ' is-pinned' : '' ?>" data-file-card data-file-id="<?= $fileId ?>" draggable="<?= $canMove ? 'true' : 'false' ?>" data-file-name="<?= gc_h($file['original_name']) ?>">
@@ -1254,6 +1300,9 @@ gc_head('Хранилище', 'storage');
 
                         <div class="gc_drive_tags">
                             <span class="gc_tag gc_tag--xs gc_tag--<?= gc_h($accessTone) ?>"><?= gc_h($accessLabel) ?></span>
+                            <?php if ($adminPersonal) { ?>
+                            <span class="gc_tag gc_tag--xs">Владелец: <?= gc_h($file['uploader']) ?></span>
+                            <?php } ?>
                             <?php foreach (array_slice($tags, 0, 2) as $tagName) { ?>
                             <span class="gc_tag gc_tag--xs"><?= gc_h($tagName) ?></span>
                             <?php } ?>
@@ -1263,6 +1312,15 @@ gc_head('Хранилище', 'storage');
                         </div>
 
                         <div class="gc_drive_tileacts">
+                            <?php if ($canPreview) { ?>
+                            <button type="button" class="gc_iconbtn" title="Открыть для просмотра" aria-label="Открыть для просмотра"
+                                    data-file-preview="<?= $fileId ?>"
+                                    data-file-name="<?= gc_h($file['original_name']) ?>"
+                                    data-preview-kind="<?= gc_h($previewKind) ?>"
+                                    data-preview-download="download.php?id=<?= $fileId ?>">
+                                <span class="gc_ico gc_ico--eye"></span>
+                            </button>
+                            <?php } ?>
                             <?php if ($canDownload) { ?>
                             <a class="gc_iconbtn" href="download.php?id=<?= $fileId ?>" title="Скачать" aria-label="Скачать"><span class="gc_ico gc_ico--download"></span></a>
                             <?php } ?>
@@ -1274,7 +1332,7 @@ gc_head('Хранилище', 'storage');
                                 <span class="gc_ico gc_ico--permission"></span>
                             </button>
                             <?php } ?>
-                            <?php if ($canPin) { ?>
+                            <?php if ($canPin && !$adminPersonal) { ?>
                             <form method="post" action="storage.php">
                                 <?= gc_csrf_field() ?>
                                 <input type="hidden" name="action" value="file_pin">
@@ -1325,11 +1383,13 @@ gc_head('Хранилище', 'storage');
                                 break;
                             }
                         }
-                        $canDownload = $isOwner || $hasDirect || $hasTag;
-                        $canDelete = $isOwner || $canDeleteAny;
-                        $canMove = $isOwner || $canEditAny;
-                        $canManageFile = $isOwner || $canEditAny || gc_is_admin();
-                        $accessLabel = $isOwner ? 'Мой файл' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр')));
+                        $canDownload = $isSuperadmin || $isOwner || $hasDirect || $hasTag;
+                        $previewKind = gc_preview_kind((string) ($file['mime_type'] ?? ''), (string) $file['original_name']);
+                        $canPreview = $canDownload && $previewKind !== '';
+                        $canDelete = !$adminPersonal && ($isOwner || $canDeleteAny);
+                        $canMove = !$adminPersonal && ($isOwner || $canEditAny);
+                        $canManageFile = !$adminPersonal && ($isOwner || $canEditAny || gc_is_admin());
+                        $accessLabel = $isOwner ? 'Мой файл' : ($isSuperadmin ? 'Суперпользователь' : ($hasDirect ? 'Личный доступ' : ($hasTag ? 'По тегу' : ($viewAll ? 'Просмотр' : 'Только просмотр'))));
                         $accessTone = $isOwner ? 'accent' : ($hasDirect ? 'info' : 'violet');
                         ?>
                     <div class="gc_filerow<?= $isPinned ? ' is-pinned' : '' ?>" data-file-id="<?= $fileId ?>" draggable="<?= $canMove ? 'true' : 'false' ?>" data-file-name="<?= gc_h($file['original_name']) ?>">
@@ -1365,6 +1425,15 @@ gc_head('Хранилище', 'storage');
                         <div class="gc_cell--date"><?= gc_h(gc_dt($file['uploaded_at'])) ?></div>
 
                         <div class="gc_cell--acts">
+                            <?php if ($canPreview) { ?>
+                            <button type="button" class="gc_iconbtn" title="Открыть для просмотра" aria-label="Открыть для просмотра"
+                                    data-file-preview="<?= $fileId ?>"
+                                    data-file-name="<?= gc_h($file['original_name']) ?>"
+                                    data-preview-kind="<?= gc_h($previewKind) ?>"
+                                    data-preview-download="download.php?id=<?= $fileId ?>">
+                                <span class="gc_ico gc_ico--eye"></span>
+                            </button>
+                            <?php } ?>
                             <?php if ($canDownload) { ?>
                             <a class="gc_iconbtn" href="download.php?id=<?= $fileId ?>" title="Скачать" aria-label="Скачать">
                                 <span class="gc_ico gc_ico--download"></span>
@@ -1384,7 +1453,7 @@ gc_head('Хранилище', 'storage');
                             </button>
                             <?php } ?>
 
-                            <?php if ($canPin) { ?>
+                            <?php if ($canPin && !$adminPersonal) { ?>
                             <form method="post" action="storage.php">
                                 <?= gc_csrf_field() ?>
                                 <input type="hidden" name="action" value="file_pin">
@@ -1579,6 +1648,29 @@ gc_head('Хранилище', 'storage');
                 </div>
                 <button type="submit" class="gc_btn gc_btn--primary">Сохранить</button>
             </form>
+        </div>
+    </dialog>
+
+    <dialog class="gc_modal gc_preview_modal" id="gcPreviewDialog">
+        <div class="gc_modal_panel gc_preview_panel">
+            <div class="gc_modal_head">
+                <div>
+                    <span class="gc_modal_eyebrow">Просмотр</span>
+                    <h2 data-preview-title>Файл</h2>
+                </div>
+                <button type="button" class="gc_iconbtn" data-preview-close title="Закрыть" aria-label="Закрыть">
+                    <span class="gc_ico gc_ico--close"></span>
+                </button>
+            </div>
+            <div class="gc_preview_body" data-preview-body>
+                <p class="gc_muted">Загрузка…</p>
+            </div>
+            <div class="gc_preview_foot">
+                <span class="gc_muted" data-preview-note></span>
+                <a class="gc_btn gc_btn--outline gc_btn--sm" href="#" data-preview-download>
+                    <span class="gc_ico gc_ico--download"></span> Скачать
+                </a>
+            </div>
         </div>
     </dialog>
 </div>
