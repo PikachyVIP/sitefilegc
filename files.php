@@ -37,6 +37,9 @@ if ($can_view_any) {
                to_char(f.uploaded_at, \'YYYY-MM-DD\') AS uploaded_day
         FROM files f
         JOIN users u ON f.uploader_id = u.id
+        WHERE (f.folder_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM folders fo WHERE fo.id = f.folder_id AND fo.is_personal
+        ))
         ORDER BY is_pinned DESC, uploaded_at DESC
     ';
     $stmt = $pdo->prepare($query);
@@ -52,10 +55,14 @@ if ($can_view_any) {
         JOIN users u ON f.uploader_id = u.id
         LEFT JOIN file_access fa ON f.id = fa.file_id
         LEFT JOIN file_tags ft ON f.id = ft.file_id
-        WHERE 
+        WHERE (
             f.uploader_id = ?
             OR fa.user_id = ?
             OR ft.tag_id IN (' . (!empty($user_tag_ids) ? implode(',', array_fill(0, count($user_tag_ids), '?')) : '0') . ')
+        )
+        AND (f.folder_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM folders fo WHERE fo.id = f.folder_id AND fo.is_personal
+        ))
         ORDER BY is_pinned DESC, uploaded_at DESC
     ';
 

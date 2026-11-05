@@ -1691,6 +1691,30 @@
     align-items: start;
 }
 .gc_upload_row .gc_drop { padding: 22px 18px; align-self: stretch; }
+.gc_upload_pick { display: grid; gap: 10px; min-width: 0; }
+.gc_upload_pick_foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    min-height: 32px;
+}
+.gc_upload_pick_foot .gc_btn { cursor: pointer; }
+.gc_drop_dir_name {
+    color: var(--gc_text-muted);
+    font-size: 11.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+.gc_upload_note {
+    margin: 0 0 12px;
+    color: var(--gc_text-muted);
+    font-size: 11.5px;
+    line-height: 1.5;
+}
 
 .gc_upload_panel > summary {
     display: flex;

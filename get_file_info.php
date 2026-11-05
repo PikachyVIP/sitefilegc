@@ -25,6 +25,20 @@ if (!isset($_GET['id'])) {
 }
 
 $file_id = (int)$_GET['id'];
+$user_id = (int)$_SESSION['user_id'];
+
+$stmt = $pdo->prepare(
+    'SELECT f.uploader_id, COALESCE(fo.is_personal, FALSE) AS is_personal, fo.created_by AS folder_owner'
+    . ' FROM files f LEFT JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?'
+);
+$stmt->execute([$file_id]);
+$file_row = $stmt->fetch();
+if (!$file_row || (gc_bool_value($file_row['is_personal'])
+    && ((int) $file_row['uploader_id'] !== $user_id || (int) $file_row['folder_owner'] !== $user_id))) {
+    http_response_code(403);
+    echo json_encode(['error' => 'Нет доступа']);
+    exit;
+}
 
 // Получаем теги файла
 $stmt = $pdo->prepare('SELECT t.name FROM tags t JOIN file_tags ft ON t.id = ft.tag_id WHERE ft.file_id = ?');

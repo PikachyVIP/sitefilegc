@@ -11,7 +11,7 @@ require_once __DIR__ . '/session.php';
 
 const GC_APP_NAME = 'GC Files';
 const GC_APP_VERSION = '2.2.0';
-const GC_ASSET_VERSION = '2.2.10';
+const GC_ASSET_VERSION = '2.2.12';
 
 // Hard ceiling for every uploaded file, independent of php.ini. 20 GiB.
 const GC_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
@@ -314,6 +314,36 @@ function gc_clean_ext(string $name): string
     return in_array($extension, $dangerous, true) ? '' : $extension;
 }
 
+function gc_safe_folder_name(string $name): string
+{
+    $name = str_replace(['\\', '/'], '', $name);
+    $name = preg_replace('/[\x00-\x1F\x7F]/u', '', $name) ?? '';
+    $name = trim($name);
+    if ($name === '' || $name === '.' || $name === '..') {
+        return '';
+    }
+
+    return gc_cut($name, 0, 80);
+}
+
+function gc_upload_path_parts(string $path): array
+{
+    $path = str_replace('\\', '/', $path);
+    $parts = [];
+    foreach (explode('/', $path) as $part) {
+        $part = gc_safe_folder_name($part);
+        if ($part === '') {
+            continue;
+        }
+        $parts[] = $part;
+        if (count($parts) >= 32) {
+            break;
+        }
+    }
+
+    return $parts;
+}
+
 function gc_safe_upload_name(string $name): string
 {
     $name = str_replace('\\', '/', $name);
@@ -494,6 +524,42 @@ function gc_storage_link(int $folder, string $sort = 'date', string $dir = 'desc
         $params['scope'] = $scope;
     }
     return 'storage.php?' . http_build_query($params);
+}
+
+/**
+ * Returns the root of the user's personal folder, creating it on first use.
+ * All descendants share the is_personal flag and are hidden from every other user.
+ */
+function gc_personal_folder_id(PDO $pdo, int $userId): int
+{
+    $statement = $pdo->prepare(
+        'SELECT id FROM folders WHERE is_personal = TRUE AND parent_id IS NULL AND created_by = ? LIMIT 1'
+    );
+    $statement->execute([$userId]);
+    $folderId = (int) $statement->fetchColumn();
+    if ($folderId > 0) {
+        return $folderId;
+    }
+
+    try {
+        $statement = $pdo->prepare(
+            "INSERT INTO folders (name, parent_id, created_by, is_personal)
+             VALUES ('Личные файлы', NULL, ?, TRUE) RETURNING id"
+        );
+        $statement->execute([$userId]);
+
+        return (int) $statement->fetchColumn();
+    } catch (PDOException $exception) {
+        $statement = $pdo->prepare(
+            'SELECT id FROM folders WHERE is_personal = TRUE AND parent_id IS NULL AND created_by = ? LIMIT 1'
+        );
+        $statement->execute([$userId]);
+        $folderId = (int) $statement->fetchColumn();
+        if ($folderId > 0) {
+            return $folderId;
+        }
+        throw $exception;
+    }
 }
 
 set_exception_handler(function (Throwable $error): void {

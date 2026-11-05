@@ -12,7 +12,7 @@ if ($folderId <= 0) {
     gc_redirect('storage.php');
 }
 
-$folders = $pdo->query('SELECT id, name, parent_id, created_by FROM folders ORDER BY id')->fetchAll();
+$folders = $pdo->query('SELECT id, name, parent_id, created_by, is_personal FROM folders ORDER BY id')->fetchAll();
 $folderMap = [];
 $children = [];
 foreach ($folders as $row) {
@@ -23,6 +23,7 @@ foreach ($folders as $row) {
         'name' => (string) $row['name'],
         'parent_id' => $parent,
         'created_by' => (int) $row['created_by'],
+        'is_personal' => gc_bool_value($row['is_personal']),
     ];
     $children[$parent][] = $id;
 }
@@ -51,6 +52,9 @@ $viewAll = gc_has_right('view_any_file');
 $canSeeFolder = static function (int $id) use ($folderMap, $folderTags, $userTagSet, $viewAll, $uid): bool {
     if (!isset($folderMap[$id])) {
         return false;
+    }
+    if (!empty($folderMap[$id]['is_personal'])) {
+        return (int) $folderMap[$id]['created_by'] === $uid;
     }
     if ((int) $folderMap[$id]['created_by'] === $uid || $viewAll) {
         return true;
@@ -99,16 +103,26 @@ $walk($folderId);
 
 $ids = array_keys($scopeFolders);
 $in = implode(',', array_fill(0, count($ids), '?'));
-$statement = $pdo->prepare(
-    'SELECT DISTINCT f.id, f.filename, f.original_name, f.folder_id FROM files f'
-    . ' WHERE f.folder_id IN (' . $in . ')'
-    . ' AND (f.uploader_id = ?'
-    . ' OR EXISTS (SELECT 1 FROM file_access fa WHERE fa.file_id = f.id AND fa.user_id = ?)'
-    . ' OR EXISTS (SELECT 1 FROM file_tags ft JOIN user_tags ut ON ut.tag_id = ft.tag_id'
-    . ' WHERE ft.file_id = f.id AND ut.user_id = ?))'
-    . ' ORDER BY f.original_name'
-);
-$statement->execute(array_merge($ids, [$uid, $uid, $uid]));
+$personalDownload = !empty($folderMap[$folderId]['is_personal']);
+if ($personalDownload) {
+    $statement = $pdo->prepare(
+        'SELECT DISTINCT f.id, f.filename, f.original_name, f.folder_id FROM files f'
+        . ' WHERE f.folder_id IN (' . $in . ') AND f.uploader_id = ?'
+        . ' ORDER BY f.original_name'
+    );
+    $statement->execute(array_merge($ids, [$uid]));
+} else {
+    $statement = $pdo->prepare(
+        'SELECT DISTINCT f.id, f.filename, f.original_name, f.folder_id FROM files f'
+        . ' WHERE f.folder_id IN (' . $in . ')'
+        . ' AND (f.uploader_id = ?'
+        . ' OR EXISTS (SELECT 1 FROM file_access fa WHERE fa.file_id = f.id AND fa.user_id = ?)'
+        . ' OR EXISTS (SELECT 1 FROM file_tags ft JOIN user_tags ut ON ut.tag_id = ft.tag_id'
+        . ' WHERE ft.file_id = f.id AND ut.user_id = ?))'
+        . ' ORDER BY f.original_name'
+    );
+    $statement->execute(array_merge($ids, [$uid, $uid, $uid]));
+}
 $files = $statement->fetchAll();
 
 if ($files === []) {

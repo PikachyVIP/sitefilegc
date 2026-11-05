@@ -14,8 +14,10 @@ $user_id = (int) $_SESSION['user_id'];
 $user_tags = $_SESSION['tags'] ?? [];
 
 $stmt = $pdo->prepare(
-    'SELECT f.*, u.login AS uploader_login
+    'SELECT f.*, u.login AS uploader_login, COALESCE(fo.is_personal, FALSE) AS is_personal,
+            fo.created_by AS folder_owner
        FROM files f JOIN users u ON f.uploader_id = u.id
+       LEFT JOIN folders fo ON fo.id = f.folder_id
       WHERE f.id = ?'
 );
 $stmt->execute([$file_id]);
@@ -23,6 +25,12 @@ $file = $stmt->fetch();
 if (!is_array($file)) {
     http_response_code(404);
     exit('Файл не найден');
+}
+
+$is_personal_file = (bool) ($file['is_personal'] ?? false);
+if ($is_personal_file && ((int) $file['uploader_id'] !== $user_id || (int) $file['folder_owner'] !== $user_id)) {
+    http_response_code(403);
+    exit('Нет доступа к файлу');
 }
 
 $can_download = (int) $file['uploader_id'] === $user_id;

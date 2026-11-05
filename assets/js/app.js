@@ -148,8 +148,11 @@
 
     function initDrops() {
         $$('.gc_drop').forEach(function (drop) {
+            var form = drop.closest('form');
             var input = drop.querySelector('input[type="file"]');
+            var dirInput = form ? form.querySelector('[data-folder-input]') : null;
             var nameEl = drop.querySelector('[data-drop-name]');
+            var dirNameEl = form ? form.querySelector('[data-dir-name]') : null;
             var hint = drop.querySelector('[data-drop-hint]');
             if (!input) return;
 
@@ -162,26 +165,110 @@
                 return forms[2];
             }
 
-            function render() {
-                var files = input.files;
-                var file = files && files[0];
-                drop.classList.toggle('has-file', !!file);
-                if (file) {
-                    if (files.length > 1) {
-                        var total = 0;
-                        for (var i = 0; i < files.length; i++) total += files[i].size;
-                        if (nameEl) nameEl.textContent = files.length + ' ' + plural(files.length, ['файл', 'файла', 'файлов']) + ' · ' + formatSize(total);
-                    } else if (nameEl) {
-                        nameEl.textContent = file.name + ' · ' + formatSize(file.size);
-                    }
-                    if (hint) hint.textContent = 'Нажмите, чтобы выбрать другие файлы';
-                } else {
-                    drop.classList.remove('has-file');
-                    if (hint) hint.textContent = 'или нажмите, чтобы выбрать';
-                }
+            function filesOf(target) {
+                return target && target.files ? Array.prototype.slice.call(target.files) : [];
             }
 
-            input.addEventListener('change', render);
+            function pathsOf(target) {
+                var files = filesOf(target);
+                if (target && target._gcPaths && target._gcPaths.length === files.length) {
+                    return target._gcPaths;
+                }
+                return files.map(function (file) { return file.webkitRelativePath || file.name; });
+            }
+
+            function setFiles(target, items) {
+                if (!target) return;
+                try {
+                    var transfer = new DataTransfer();
+                    items.forEach(function (item) { transfer.items.add(item.file); });
+                    target.files = transfer.files;
+                } catch (error) {
+                    try {
+                        target.files = items.map(function (item) { return item.file; });
+                    } catch (ignored) {
+                        return;
+                    }
+                }
+                target._gcPaths = items.map(function (item) { return item.path; });
+            }
+
+            function readEntries(reader) {
+                return new Promise(function (resolve, reject) {
+                    var all = [];
+                    function next() {
+                        reader.readEntries(function (entries) {
+                            if (!entries.length) {
+                                resolve(all);
+                                return;
+                            }
+                            all = all.concat(Array.prototype.slice.call(entries));
+                            next();
+                        }, reject);
+                    }
+                    next();
+                });
+            }
+
+            function walkEntry(entry, prefix) {
+                if (!entry) return Promise.resolve([]);
+                if (entry.isFile) {
+                    return new Promise(function (resolve, reject) {
+                        entry.file(function (file) {
+                            resolve([{ file: file, path: prefix + file.name }]);
+                        }, reject);
+                    });
+                }
+                if (entry.isDirectory) {
+                    return readEntries(entry.createReader()).then(function (entries) {
+                        return Promise.all(entries.map(function (child) {
+                            return walkEntry(child, prefix + entry.name + '/');
+                        }));
+                    }).then(function (groups) {
+                        return groups.reduce(function (all, group) { return all.concat(group); }, []);
+                    });
+                }
+                return Promise.resolve([]);
+            }
+
+            function render() {
+                var files = filesOf(input);
+                var dirFiles = filesOf(dirInput);
+                var all = files.concat(dirFiles);
+                var total = 0;
+                all.forEach(function (file) { total += file.size; });
+                drop.classList.toggle('has-file', all.length > 0);
+                if (nameEl) {
+                    if (all.length === 0) {
+                        nameEl.textContent = '';
+                    } else if (all.length === 1) {
+                        nameEl.textContent = all[0].name + ' · ' + formatSize(all[0].size);
+                    } else {
+                        nameEl.textContent = all.length + ' ' + plural(all.length, ['файл', 'файла', 'файлов']) + ' · ' + formatSize(total);
+                    }
+                }
+                if (dirNameEl) {
+                    dirNameEl.textContent = dirFiles.length
+                        ? 'В папке: ' + dirFiles.length + ' ' + plural(dirFiles.length, ['файл', 'файла', 'файлов'])
+                        : '';
+                }
+                if (hint) hint.textContent = all.length ? 'Нажмите, чтобы выбрать другие файлы' : 'Можно несколько · до 20 ГБ каждый';
+            }
+
+            input.addEventListener('change', function () {
+                input._gcPaths = filesOf(input).map(function (file) {
+                    return file.webkitRelativePath || file.name;
+                });
+                render();
+            });
+            if (dirInput) {
+                dirInput.addEventListener('change', function () {
+                    dirInput._gcPaths = filesOf(dirInput).map(function (file) {
+                        return file.webkitRelativePath || file.name;
+                    });
+                    render();
+                });
+            }
 
             ['dragenter', 'dragover'].forEach(function (type) {
                 drop.addEventListener(type, function (event) {
@@ -195,10 +282,32 @@
             drop.addEventListener('drop', function (event) {
                 event.preventDefault();
                 drop.classList.remove('is-drag');
-                if (event.dataTransfer && event.dataTransfer.files.length) {
-                    input.files = event.dataTransfer.files;
-                    render();
+                var transfer = event.dataTransfer;
+                if (!transfer) return;
+                var entries = [];
+                if (transfer.items && transfer.items.length) {
+                    Array.prototype.forEach.call(transfer.items, function (item) {
+                        var entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+                        if (entry) entries.push(entry);
+                    });
                 }
+                if (!entries.length) {
+                    var dropped = Array.prototype.slice.call(transfer.files || []);
+                    if (dropped.length) {
+                        setFiles(input, dropped.map(function (file) {
+                            return { file: file, path: file.name };
+                        }));
+                        render();
+                    }
+                    return;
+                }
+                Promise.all(entries.map(function (entry) { return walkEntry(entry, ''); })).then(function (groups) {
+                    var items = groups.reduce(function (all, group) { return all.concat(group); }, []);
+                    if (!items.length) return;
+                    var hasFolder = items.some(function (item) { return item.path.indexOf('/') !== -1; });
+                    setFiles(hasFolder && dirInput ? dirInput : input, items);
+                    render();
+                });
             });
         });
     }
@@ -582,7 +691,8 @@
     function initUploadProgress() {
         var form = $('[data-upload-form]');
         if (!form || !window.FormData || !window.XMLHttpRequest) return;
-        var input = form.querySelector('input[type="file"]');
+        var input = form.querySelector('input[name="files[]"]');
+        var dirInput = form.querySelector('[data-folder-input]');
         if (!input) return;
         var progress = form.querySelector('[data-upload-progress]');
         var bar = form.querySelector('[data-upload-bar]');
@@ -590,12 +700,23 @@
         var status = form.querySelector('[data-upload-status]');
         var busy = false;
 
+        function appendPaths(data, target, field) {
+            if (!target || !target.files || !target.files.length) return;
+            var files = Array.prototype.slice.call(target.files);
+            var paths = target._gcPaths && target._gcPaths.length === files.length
+                ? target._gcPaths
+                : files.map(function (file) { return file.webkitRelativePath || file.name; });
+            paths.forEach(function (path) { data.append(field + '[]', path); });
+        }
+
         form.addEventListener('submit', function (event) {
             if (busy) {
                 event.preventDefault();
                 return;
             }
-            if (!input.files || !input.files.length) return;
+            var hasFiles = (input.files && input.files.length)
+                || (dirInput && dirInput.files && dirInput.files.length);
+            if (!hasFiles) return;
             event.preventDefault();
             busy = true;
 
@@ -605,6 +726,8 @@
             if (status) status.textContent = 'Загрузка…';
 
             var data = new FormData(form);
+            appendPaths(data, input, 'paths');
+            appendPaths(data, dirInput, 'dir_paths');
             data.append('ajax', '1');
             var xhr = new XMLHttpRequest();
             /* form.action is shadowed by the hidden input named "action". */

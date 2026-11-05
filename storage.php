@@ -14,9 +14,13 @@ if (!in_array($sort, ['name', 'date', 'size', 'type'], true)) {
 }
 $dir = isset($_GET['dir']) && $_GET['dir'] === 'asc' ? 'asc' : 'desc';
 $scope = isset($_GET['scope']) && is_string($_GET['scope']) ? $_GET['scope'] : 'all';
-if (!in_array($scope, ['all', 'mine', 'tag', 'direct'], true)) {
+if ($scope === 'mine') {
+    $scope = 'personal';
+} elseif (!in_array($scope, ['all', 'personal'], true)) {
     $scope = 'all';
 }
+
+$personalRootId = gc_personal_folder_id($pdo, $uid);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     gc_csrf_check();
@@ -28,7 +32,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $returnDir = isset($_POST['dir']) && $_POST['dir'] === 'asc' ? 'asc' : 'desc';
     $returnScope = isset($_POST['scope']) && is_string($_POST['scope']) ? $_POST['scope'] : 'all';
-    if (!in_array($returnScope, ['all', 'mine', 'tag', 'direct'], true)) {
+    if ($returnScope === 'mine') {
+        $returnScope = 'personal';
+    } elseif (!in_array($returnScope, ['all', 'personal'], true)) {
         $returnScope = 'all';
     }
     $returnUrl = gc_storage_link($returnFolder, $returnSort, $returnDir, $returnScope);
@@ -47,21 +53,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         };
 
         $targetFolder = $returnFolder;
+        if ($returnScope === 'personal') {
+            $targetFolder = $personalRootId;
+        }
         if ($targetFolder > 0) {
-            $check = $pdo->prepare('SELECT 1 FROM folders WHERE id = ?');
+            $check = $pdo->prepare('SELECT is_personal, created_by FROM folders WHERE id = ?');
             $check->execute([$targetFolder]);
-            if (!$check->fetchColumn()) {
+            $targetRow = $check->fetch();
+            $targetIsPersonal = $targetRow && gc_bool_value($targetRow['is_personal']);
+            $targetOwner = $targetRow ? (int) $targetRow['created_by'] : 0;
+
+            if ($returnScope === 'personal') {
+                if (!$targetRow || !$targetIsPersonal || $targetOwner !== $uid) {
+                    $targetFolder = $personalRootId;
+                }
+            } elseif (!$targetRow || $targetIsPersonal) {
                 $targetFolder = 0;
             }
         }
 
-        $incoming = $_FILES['files'] ?? $_FILES['file'] ?? null;
+        $sources = [
+            ['field' => 'files', 'paths' => $_POST['paths'] ?? []],
+            ['field' => 'dir_files', 'paths' => $_POST['dir_paths'] ?? []],
+            ['field' => 'file', 'paths' => []],
+        ];
         $queue = [];
-        if (is_array($incoming) && isset($incoming['name'])) {
+        foreach ($sources as $source) {
+            $incoming = $_FILES[$source['field']] ?? null;
+            if (!is_array($incoming) || !isset($incoming['name'])) {
+                continue;
+            }
+            $paths = is_array($source['paths']) ? array_values($source['paths']) : [$source['paths']];
             if (is_array($incoming['name'])) {
                 foreach (array_keys($incoming['name']) as $index) {
                     $queue[] = [
                         'name' => (string) $incoming['name'][$index],
+                        'path' => isset($paths[$index]) && is_string($paths[$index]) ? $paths[$index] : (string) $incoming['name'][$index],
                         'tmp_name' => (string) $incoming['tmp_name'][$index],
                         'error' => (int) $incoming['error'][$index],
                         'size' => (int) $incoming['size'][$index],
@@ -70,6 +97,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $queue[] = [
                     'name' => (string) $incoming['name'],
+                    'path' => isset($paths[0]) && is_string($paths[0]) ? $paths[0] : (string) $incoming['name'],
                     'tmp_name' => (string) $incoming['tmp_name'],
                     'error' => (int) $incoming['error'],
                     'size' => (int) $incoming['size'],
@@ -126,11 +154,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        $personalUpload = $returnScope === 'personal';
+        if (!$personalUpload && $tagIds === [] && $loginIds === []) {
+            $personalUpload = true;
+            $targetFolder = $personalRootId;
+        }
+
+        $folderCache = [];
+        $resolveUploadFolder = static function (array $parts) use ($pdo, $uid, $tagIds, $targetFolder, $personalUpload, &$folderCache): int {
+            $parent = $targetFolder;
+            $cacheKey = $targetFolder . '|' . strtolower(implode('/', $parts));
+            if (isset($folderCache[$cacheKey])) {
+                return $folderCache[$cacheKey];
+            }
+
+            foreach ($parts as $part) {
+                $statement = $pdo->prepare('SELECT id FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? LIMIT 1');
+                $statement->execute([$parent, $part, $personalUpload]);
+                $folderId = (int) $statement->fetchColumn();
+                if ($folderId <= 0) {
+                    try {
+                        $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by, is_personal) VALUES (?, ?, ?, ?) RETURNING id');
+                        $statement->execute([$part, $parent > 0 ? $parent : null, $uid, $personalUpload]);
+                        $folderId = (int) $statement->fetchColumn();
+                        if ($tagIds !== []) {
+                            $tagStatement = $pdo->prepare('INSERT INTO folder_tags (folder_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING');
+                            foreach ($tagIds as $tagId) {
+                                $tagStatement->execute([$folderId, $tagId]);
+                            }
+                        }
+                    } catch (Throwable $exception) {
+                        $statement = $pdo->prepare('SELECT id FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? LIMIT 1');
+                        $statement->execute([$parent, $part, $personalUpload]);
+                        $folderId = (int) $statement->fetchColumn();
+                        if ($folderId <= 0) {
+                            throw $exception;
+                        }
+                    }
+                }
+                $parent = $folderId;
+            }
+
+            $folderCache[$cacheKey] = $parent;
+
+            return $parent;
+        };
+
         $uploaded = 0;
         $errors = [];
         $max = gc_max_upload();
         foreach ($queue as $item) {
-            $label = $item['name'] !== '' ? $item['name'] : 'файл';
+            $label = $item['path'] !== '' ? $item['path'] : ($item['name'] !== '' ? $item['name'] : 'файл');
             if ($item['error'] !== UPLOAD_ERR_OK) {
                 $errors[] = $label . ': ' . gc_upload_error($item['error']);
                 continue;
@@ -144,7 +218,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 continue;
             }
 
-            $original = gc_safe_upload_name($item['name']);
+            $parts = gc_upload_path_parts($item['path'] !== '' ? $item['path'] : $item['name']);
+            $filename = array_pop($parts);
+            $original = gc_safe_upload_name($filename !== null ? $filename : $item['name']);
             $ext = gc_clean_ext($original);
             $stored = bin2hex(random_bytes(16)) . ($ext !== '' ? '.' . $ext : '');
             $path = $uploadDir . '/' . $stored;
@@ -155,6 +231,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             try {
+                $fileFolder = $parts === [] ? $targetFolder : $resolveUploadFolder($parts);
                 $pdo->beginTransaction();
                 $statement = $pdo->prepare(
                     'INSERT INTO files (filename, original_name, uploader_id, folder_id, file_size, mime_type)
@@ -164,7 +241,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stored,
                     $original,
                     $uid,
-                    $targetFolder > 0 ? $targetFolder : null,
+                    $fileFolder > 0 ? $fileFolder : null,
                     $item['size'],
                     gc_mime_type($path),
                 ]);
@@ -204,6 +281,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($uploaded > 0) {
             gc_flash('ok', 'Загружено файлов: ' . $uploaded . '.');
+            if ($personalUpload && $returnScope === 'all') {
+                gc_flash('info', 'Файлы без тегов и личного доступа сохранены в «Личные файлы».');
+            }
         }
         foreach (array_slice($errors, 0, 5) as $error) {
             gc_flash('error', $error);
@@ -213,11 +293,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'folder_create') {
         $parentId = $returnFolder;
+        $parentPersonal = false;
+        if ($returnScope === 'personal' && $parentId <= 0) {
+            $parentId = $personalRootId;
+        }
         if ($parentId > 0) {
-            $check = $pdo->prepare('SELECT 1 FROM folders WHERE id = ?');
+            $check = $pdo->prepare('SELECT is_personal, created_by FROM folders WHERE id = ?');
             $check->execute([$parentId]);
-            if (!$check->fetchColumn()) {
+            $parentRow = $check->fetch();
+            if (!$parentRow) {
                 $parentId = 0;
+            } else {
+                $parentPersonal = gc_bool_value($parentRow['is_personal']);
+                if ($parentPersonal && (int) $parentRow['created_by'] !== $uid) {
+                    gc_flash('error', 'Личная папка доступна только её владельцу.');
+                    gc_redirect($returnUrl);
+                }
             }
         }
         $name = isset($_POST['folder_name']) && is_string($_POST['folder_name']) ? trim($_POST['folder_name']) : '';
@@ -226,15 +317,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             gc_redirect($returnUrl);
         }
 
-        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?)');
-        $statement->execute([$parentId, $name]);
+        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ?');
+        $statement->execute([$parentId, $name, $parentPersonal]);
         if ($statement->fetchColumn()) {
             gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
             gc_redirect($returnUrl);
         }
 
-        $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by) VALUES (?, ?, ?) RETURNING id');
-        $statement->execute([$name, $parentId > 0 ? $parentId : null, $uid]);
+        $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by, is_personal) VALUES (?, ?, ?, ?) RETURNING id');
+        $statement->execute([$name, $parentId > 0 ? $parentId : null, $uid, $parentPersonal]);
         $newFolderId = (int) $statement->fetchColumn();
 
         gc_flash('ok', 'Папка «' . $name . '» создана.');
@@ -244,11 +335,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'folder_rename') {
         $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
         $name = isset($_POST['folder_name']) && is_string($_POST['folder_name']) ? trim($_POST['folder_name']) : '';
-        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by FROM folders WHERE id = ?');
+        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by, is_personal FROM folders WHERE id = ?');
         $statement->execute([$id]);
         $folderRow = $statement->fetch();
 
-        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+        $isPersonalFolder = $folderRow && gc_bool_value($folderRow['is_personal']);
+        $allowed = $folderRow && ($isPersonalFolder
+            ? (int) $folderRow['created_by'] === $uid
+            : ((int) $folderRow['created_by'] === $uid || gc_is_admin() || gc_has_right('edit_any_file')));
+        if (!$allowed) {
             gc_flash('error', 'Переименовать папку может только её создатель или администратор.');
             gc_redirect($returnUrl);
         }
@@ -258,8 +353,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $parentId = (int) ($folderRow['parent_id'] ?? 0);
-        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND id <> ?');
-        $statement->execute([$parentId, $name, $id]);
+        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? AND id <> ?');
+        $statement->execute([$parentId, $name, $isPersonalFolder, $id]);
         if ($statement->fetchColumn()) {
             gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
             gc_redirect($returnUrl);
@@ -272,28 +367,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'folder_delete') {
         $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
-        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by FROM folders WHERE id = ?');
+        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by, is_personal FROM folders WHERE id = ?');
         $statement->execute([$id]);
         $folderRow = $statement->fetch();
 
-        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+        $isPersonalFolder = $folderRow && gc_bool_value($folderRow['is_personal']);
+        if ($isPersonalFolder && (int) ($folderRow['parent_id'] ?? 0) === 0) {
+            gc_flash('error', 'Корневую личную папку нельзя удалить.');
+            gc_redirect($returnUrl);
+        }
+        if ($isPersonalFolder) {
+            $allowed = $folderRow && (int) $folderRow['created_by'] === $uid;
+        } else {
+            $allowed = $folderRow && ((int) $folderRow['created_by'] === $uid || gc_is_admin() || gc_has_right('edit_any_file'));
+        }
+        if (!$allowed) {
             gc_flash('error', 'Удалить папку может только её создатель или администратор.');
             gc_redirect($returnUrl);
         }
 
         $parentId = (int) ($folderRow['parent_id'] ?? 0);
+        $treeIds = [$id];
+        $cursor = 0;
+        do {
+            $known = implode(',', array_map('intval', $treeIds));
+            $statement = $pdo->query('SELECT id FROM folders WHERE parent_id IN (' . $known . ')');
+            $next = array_map('intval', $statement->fetchAll(PDO::FETCH_COLUMN));
+            $next = array_values(array_diff($next, $treeIds));
+            if ($next !== []) {
+                $treeIds = array_merge($treeIds, $next);
+            }
+        } while ($next !== []);
+        $treeIn = implode(',', array_map('intval', $treeIds));
+        $pdo->prepare('UPDATE files SET folder_id = ? WHERE folder_id IN (' . $treeIn . ')')
+            ->execute([$parentId > 0 ? $parentId : null]);
         $pdo->prepare('DELETE FROM folders WHERE id = ?')->execute([$id]);
-        gc_flash('ok', 'Папка удалена. Файлы из неё перемещены в корень.');
+        $where = $parentId > 0 ? 'в родительскую папку' : 'в корень';
+        gc_flash('ok', 'Папка удалена. Файлы из неё перемещены ' . $where . '.');
         gc_redirect(gc_storage_link($parentId, $returnSort, $returnDir, $returnScope));
     }
 
     if (in_array($action, ['folder_tag_add', 'folder_tag_delete', 'folder_tags_sync'], true)) {
         $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
-        $statement = $pdo->prepare('SELECT id, name, created_by FROM folders WHERE id = ?');
+        $statement = $pdo->prepare('SELECT id, name, created_by, is_personal FROM folders WHERE id = ?');
         $statement->execute([$id]);
         $folderRow = $statement->fetch();
 
-        if (!$folderRow || ((int) $folderRow['created_by'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+        $isPersonalFolder = $folderRow && gc_bool_value($folderRow['is_personal']);
+        $allowed = $folderRow && ($isPersonalFolder
+            ? (int) $folderRow['created_by'] === $uid
+            : ((int) $folderRow['created_by'] === $uid || gc_is_admin() || gc_has_right('edit_any_file')));
+        if (!$allowed) {
             gc_flash('error', 'Настраивать теги папки может только её создатель или администратор.');
             gc_redirect($returnUrl);
         }
@@ -345,11 +469,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (in_array($action, ['file_tag_add', 'file_tag_delete'], true)) {
         $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
-        $statement = $pdo->prepare('SELECT id, original_name, uploader_id FROM files WHERE id = ?');
+        $statement = $pdo->prepare(
+            'SELECT f.id, f.original_name, f.uploader_id, COALESCE(fo.is_personal, FALSE) AS is_personal,'
+            . ' fo.created_by AS folder_owner'
+            . ' FROM files f LEFT JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?'
+        );
         $statement->execute([$id]);
         $fileRow = $statement->fetch();
 
-        if (!$fileRow || ((int) $fileRow['uploader_id'] !== $uid && !gc_is_admin() && !gc_has_right('edit_any_file'))) {
+        $personalFile = $fileRow && gc_bool_value($fileRow['is_personal']);
+        $allowed = $fileRow && ($personalFile
+            ? ((int) $fileRow['uploader_id'] === $uid && (int) $fileRow['folder_owner'] === $uid)
+            : ((int) $fileRow['uploader_id'] === $uid || gc_is_admin() || gc_has_right('edit_any_file')));
+        if (!$allowed) {
             gc_flash('error', 'Менять теги файла может только автор или администратор.');
             gc_redirect($returnUrl);
         }
@@ -380,7 +512,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $targetFolder = 0;
         }
 
-        $statement = $pdo->prepare('SELECT id, original_name, uploader_id, folder_id FROM files WHERE id = ?');
+        $statement = $pdo->prepare(
+            'SELECT f.id, f.original_name, f.uploader_id, f.folder_id,'
+            . ' COALESCE(fo.is_personal, FALSE) AS is_personal, fo.created_by AS folder_owner'
+            . ' FROM files f LEFT JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?'
+        );
         $statement->execute([$id]);
         $fileRow = $statement->fetch();
 
@@ -388,21 +524,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             gc_flash('error', 'Файл не найден.');
             gc_redirect($returnUrl);
         }
-        if ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('edit_any_file')) {
+        $sourcePersonal = gc_bool_value($fileRow['is_personal']);
+        if ($sourcePersonal) {
+            if ((int) $fileRow['uploader_id'] !== $uid || (int) $fileRow['folder_owner'] !== $uid) {
+                gc_flash('error', 'Личный файл может перемещать только его владелец.');
+                gc_redirect($returnUrl);
+            }
+        } elseif ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('edit_any_file')) {
             gc_flash('error', 'Перемещать этот файл может только автор или администратор с правом редактирования.');
             gc_redirect($returnUrl);
         }
 
         $targetLabel = 'в корень';
         if ($targetFolder > 0) {
-            $statement = $pdo->prepare('SELECT name FROM folders WHERE id = ?');
+            $statement = $pdo->prepare('SELECT name, is_personal, created_by FROM folders WHERE id = ?');
             $statement->execute([$targetFolder]);
-            $targetName = $statement->fetchColumn();
-            if ($targetName === false) {
+            $targetRow = $statement->fetch();
+            if (!$targetRow) {
                 gc_flash('error', 'Папка назначения не найдена.');
                 gc_redirect($returnUrl);
             }
-            $targetLabel = 'в «' . (string) $targetName . '»';
+            $targetPersonal = gc_bool_value($targetRow['is_personal']);
+            if ($targetPersonal && ((int) $targetRow['created_by'] !== $uid || (int) $fileRow['uploader_id'] !== $uid)) {
+                gc_flash('error', 'В личную папку можно переместить только свой файл.');
+                gc_redirect($returnUrl);
+            }
+            $targetLabel = 'в «' . (string) $targetRow['name'] . '»';
         }
 
         $currentFolder = $fileRow['folder_id'] !== null ? (int) $fileRow['folder_id'] : 0;
@@ -419,7 +566,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'file_delete') {
         $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
-        $statement = $pdo->prepare('SELECT id, filename, uploader_id FROM files WHERE id = ?');
+        $statement = $pdo->prepare(
+            'SELECT f.id, f.filename, f.uploader_id, COALESCE(fo.is_personal, FALSE) AS is_personal,'
+            . ' fo.created_by AS folder_owner'
+            . ' FROM files f LEFT JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?'
+        );
         $statement->execute([$id]);
         $fileRow = $statement->fetch();
 
@@ -427,7 +578,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             gc_flash('error', 'Файл не найден.');
             gc_redirect($returnUrl);
         }
-        if ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('delete_any_file')) {
+        $personalFile = gc_bool_value($fileRow['is_personal']);
+        if ($personalFile) {
+            if ((int) $fileRow['uploader_id'] !== $uid || (int) $fileRow['folder_owner'] !== $uid) {
+                gc_flash('error', 'Личный файл может удалить только его владелец.');
+                gc_redirect($returnUrl);
+            }
+        } elseif ((int) $fileRow['uploader_id'] !== $uid && !gc_has_right('delete_any_file')) {
             gc_flash('error', 'Удалить этот файл может только автор или администратор с правом удаления.');
             gc_redirect($returnUrl);
         }
@@ -457,19 +614,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     gc_redirect($returnUrl);
 }
 
-$folders = $pdo->query('SELECT id, name, parent_id, created_by FROM folders ORDER BY lower(name), id')->fetchAll();
-$folderMap = [];
-$children = [];
+$folders = $pdo->query('SELECT id, name, parent_id, created_by, is_personal FROM folders ORDER BY lower(name), id')->fetchAll();
+$regularMap = [];
+$personalMap = [];
 foreach ($folders as $folderRow) {
     $id = (int) $folderRow['id'];
     $parent = $folderRow['parent_id'] !== null ? (int) $folderRow['parent_id'] : 0;
-    $folderMap[$id] = [
+    $node = [
         'id' => $id,
         'name' => (string) $folderRow['name'],
         'parent_id' => $parent,
         'created_by' => (int) $folderRow['created_by'],
+        'is_personal' => gc_bool_value($folderRow['is_personal']),
     ];
-    $children[$parent][] = $id;
+    if ($node['is_personal']) {
+        if ($node['created_by'] === $uid) {
+            $personalMap[$id] = $node;
+        }
+        continue;
+    }
+    $regularMap[$id] = $node;
 }
 
 $folderTags = [];
@@ -491,7 +655,7 @@ if (isset($user['tags']) && is_array($user['tags'])) {
 
 $viewAll = gc_has_right('view_any_file');
 $visibleFolderIds = [];
-foreach ($folderMap as $id => $folderRow) {
+foreach ($regularMap as $id => $folderRow) {
     $tagsForFolder = $folderTagRows[$id] ?? [];
     $visible = $tagsForFolder === [] || $viewAll || (int) $folderRow['created_by'] === $uid;
     if (!$visible) {
@@ -506,24 +670,44 @@ foreach ($folderMap as $id => $folderRow) {
         $visibleFolderIds[$id] = true;
     }
 }
-$folderMap = array_intersect_key($folderMap, $visibleFolderIds);
+$regularMap = array_intersect_key($regularMap, $visibleFolderIds);
 do {
     $changed = false;
-    foreach ($folderMap as $id => $folderRow) {
-        if ($folderRow['parent_id'] > 0 && !isset($folderMap[$folderRow['parent_id']])) {
-            unset($folderMap[$id]);
+    foreach ($regularMap as $id => $folderRow) {
+        if ($folderRow['parent_id'] > 0 && !isset($regularMap[$folderRow['parent_id']])) {
+            unset($regularMap[$id]);
             $changed = true;
         }
     }
 } while ($changed);
 
-$children = [];
-foreach ($folderMap as $id => $folderRow) {
-    $children[$folderRow['parent_id']][] = $id;
+$regularChildren = [];
+foreach ($regularMap as $id => $folderRow) {
+    $regularChildren[$folderRow['parent_id']][] = $id;
 }
 
-if ($folderId > 0 && !isset($folderMap[$folderId])) {
-    $folderId = 0;
+$personalChildren = [];
+foreach ($personalMap as $id => $folderRow) {
+    $personalChildren[$folderRow['parent_id']][] = $id;
+}
+
+if (!isset($personalMap[$personalRootId])) {
+    $personalMap = [];
+    $personalChildren = [];
+}
+
+if ($scope === 'personal') {
+    $folderMap = $personalMap;
+    $children = $personalChildren;
+    if ($folderId <= 0 || !isset($folderMap[$folderId])) {
+        $folderId = $personalRootId;
+    }
+} else {
+    $folderMap = $regularMap;
+    $children = $regularChildren;
+    if ($folderId > 0 && !isset($folderMap[$folderId])) {
+        $folderId = 0;
+    }
 }
 
 $pathFolders = [];
@@ -535,41 +719,37 @@ while ($cursor > 0 && isset($folderMap[$cursor]) && !isset($seen[$cursor])) {
     $cursor = $folderMap[$cursor]['parent_id'];
 }
 
-$visibleFolderSql = '';
-$visibleIds = array_keys($folderMap);
-if ($visibleIds !== []) {
-    $visibleFolderSql = ' AND (f.folder_id IS NULL OR f.folder_id IN (' . implode(',', array_map('intval', $visibleIds)) . '))';
-} else {
-    $visibleFolderSql = ' AND f.folder_id IS NULL';
-}
+$personalIds = array_keys($personalMap);
+$personalIn = $personalIds !== [] ? implode(',', array_map('intval', $personalIds)) : 'NULL';
+$personalFileSql = ' AND f.uploader_id = ? AND f.folder_id IN (' . $personalIn . ')';
+$personalFileParams = [$uid];
 
+$regularIds = array_keys($regularMap);
+$visibleRegularSql = $regularIds !== []
+    ? ' AND (f.folder_id IS NULL OR f.folder_id IN (' . implode(',', array_map('intval', $regularIds)) . '))'
+    : ' AND f.folder_id IS NULL';
+$nonPersonalSql = ' AND (f.folder_id IS NULL OR f.folder_id NOT IN (SELECT id FROM folders WHERE is_personal = TRUE))';
 if ($viewAll) {
-    $accessSql = $visibleFolderSql;
-    $accessParams = [];
+    $allAccessSql = $visibleRegularSql . $nonPersonalSql;
+    $allAccessParams = [];
 } else {
-    $accessSql = ' AND (f.uploader_id = ?'
+    $allAccessSql = ' AND (f.uploader_id = ?'
         . ' OR EXISTS (SELECT 1 FROM file_access fa WHERE fa.file_id = f.id AND fa.user_id = ?)'
         . ' OR EXISTS (SELECT 1 FROM file_tags ft JOIN user_tags ut ON ut.tag_id = ft.tag_id'
-        . ' WHERE ft.file_id = f.id AND ut.user_id = ?))' . $visibleFolderSql;
-    $accessParams = [$uid, $uid, $uid];
+        . ' WHERE ft.file_id = f.id AND ut.user_id = ?))' . $visibleRegularSql . $nonPersonalSql;
+    $allAccessParams = [$uid, $uid, $uid];
 }
 
-$scopeSql = '';
-$scopeParams = [];
-if ($scope === 'mine') {
-    $scopeSql = ' AND f.uploader_id = ?';
-    $scopeParams = [$uid];
-} elseif ($scope === 'tag') {
-    $scopeSql = ' AND EXISTS (SELECT 1 FROM file_tags ft2 JOIN user_tags ut2 ON ut2.tag_id = ft2.tag_id'
-        . ' WHERE ft2.file_id = f.id AND ut2.user_id = ?)';
-    $scopeParams = [$uid];
-} elseif ($scope === 'direct') {
-    $scopeSql = ' AND EXISTS (SELECT 1 FROM file_access fa2 WHERE fa2.file_id = f.id AND fa2.user_id = ?)';
-    $scopeParams = [$uid];
+if ($scope === 'personal') {
+    $accessSql = $personalFileSql;
+    $accessParams = $personalFileParams;
+} else {
+    $accessSql = $allAccessSql;
+    $accessParams = $allAccessParams;
 }
 
-$filterSql = $accessSql . $scopeSql;
-$filterParams = array_merge($accessParams, $scopeParams);
+$filterSql = $accessSql;
+$filterParams = $accessParams;
 
 $countStatement = $pdo->prepare('SELECT f.folder_id, COUNT(*) AS c FROM files f WHERE 1 = 1' . $filterSql . ' GROUP BY f.folder_id');
 $countStatement->execute($filterParams);
@@ -583,19 +763,14 @@ foreach ($countStatement->fetchAll() as $countRow) {
 }
 $folderCounts[0] = $folderCounts[0] ?? 0;
 
-$scopeCounts = ['all' => 0, 'mine' => 0, 'tag' => 0, 'direct' => 0];
-$scopeFilters = [
-    'all' => ['', []],
-    'mine' => [' AND f.uploader_id = ?', [$uid]],
-    'tag' => [' AND EXISTS (SELECT 1 FROM file_tags ft3 JOIN user_tags ut3 ON ut3.tag_id = ft3.tag_id'
-        . ' WHERE ft3.file_id = f.id AND ut3.user_id = ?)', [$uid]],
-    'direct' => [' AND EXISTS (SELECT 1 FROM file_access fa3 WHERE fa3.file_id = f.id AND fa3.user_id = ?)', [$uid]],
-];
-foreach ($scopeFilters as $scopeKey => [$scopeWhere, $scopeWhereParams]) {
-    $scopeStatement = $pdo->prepare('SELECT COUNT(*) FROM files f WHERE 1 = 1' . $accessSql . $scopeWhere);
-    $scopeStatement->execute(array_merge($accessParams, $scopeWhereParams));
-    $scopeCounts[$scopeKey] = (int) $scopeStatement->fetchColumn();
-}
+$scopeCounts = [];
+$scopeStatement = $pdo->prepare('SELECT COUNT(*) FROM files f WHERE 1 = 1' . $allAccessSql);
+$scopeStatement->execute($allAccessParams);
+$scopeCounts['all'] = (int) $scopeStatement->fetchColumn();
+
+$scopeStatement = $pdo->prepare('SELECT COUNT(*) FROM files f WHERE 1 = 1' . $personalFileSql);
+$scopeStatement->execute($personalFileParams);
+$scopeCounts['personal'] = (int) $scopeStatement->fetchColumn();
 
 $orderBy = [
     'name' => 'lower(f.original_name)',
@@ -700,8 +875,14 @@ $fileWord = static function (int $n): string {
     }
     return 'файлов';
 };
-$scopeLabels = ['all' => 'Все файлы', 'mine' => 'Мои файлы', 'tag' => 'По тегам', 'direct' => 'Личный доступ'];
-$scopeIcons = ['all' => 'folder', 'mine' => 'user', 'tag' => 'permission', 'direct' => 'link'];
+$scopeLabels = ['all' => 'Все файлы', 'personal' => 'Личные файлы'];
+$scopeIcons = ['all' => 'folder', 'personal' => 'user'];
+$scopeLinks = [
+    'all' => gc_storage_link(0, $sort, $dir, 'all'),
+    'personal' => gc_storage_link($personalRootId, $sort, $dir, 'personal'),
+];
+$rootFolderId = $scope === 'personal' ? $personalRootId : 0;
+$rootFolderLabel = $scope === 'personal' ? 'Личные файлы' : 'Корень';
 $roleTags = isset($user['tags']) && is_array($user['tags']) ? array_values($user['tags']) : [];
 $rightLabels = [];
 if (isset($user['rights']) && is_array($user['rights'])) {
@@ -719,7 +900,7 @@ gc_head('Хранилище', 'storage');
         <div>
             <div class="gc_hero_eyebrow">Файлы команды</div>
             <h1 class="gc_h1 gc_drive_title">Хранилище</h1>
-            <p class="gc_drive_lead">Файлы и папки команды. Доступ — по правам и ролям: владелец, тег, личный доступ или админ.</p>
+            <p class="gc_drive_lead">Все общие файлы и личные файлы. Личные видит только тот, кто их загрузил.</p>
         </div>
         <div class="gc_drive_stats">
             <div class="gc_hero_stat"><b><?= $totalVisible ?></b><span>файлов в этом виде</span></div>
@@ -735,9 +916,9 @@ gc_head('Хранилище', 'storage');
                 <span class="gc_badge"><?= count($folderMap) ?></span>
             </div>
 
-            <nav class="gc_drive_scopes" aria-label="Вид по доступу">
+            <nav class="gc_drive_scopes" aria-label="Разделы хранилища">
                 <?php foreach ($scopeLabels as $scopeKey => $scopeLabel) { ?>
-                <a class="gc_drive_scope<?= $scope === $scopeKey ? ' is-active' : '' ?>" href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scopeKey)) ?>">
+                <a class="gc_drive_scope<?= $scope === $scopeKey ? ' is-active' : '' ?>" href="<?= gc_h($scopeLinks[$scopeKey]) ?>">
                     <span class="gc_ico gc_ico--<?= gc_h($scopeIcons[$scopeKey]) ?>" aria-hidden="true"></span>
                     <span><?= gc_h($scopeLabel) ?></span>
                     <b><?= (int) $scopeCounts[$scopeKey] ?></b>
@@ -748,14 +929,14 @@ gc_head('Хранилище', 'storage');
             <div class="gc_drive_side_title">Папки</div>
             <ul class="gc_tree">
                 <li class="gc_tree_item gc_tree_root">
-                    <div class="gc_tree_row<?= $folderId === 0 ? ' is-active' : '' ?>">
-                        <a class="gc_tree_link" data-drop-folder="0" href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scope)) ?>">
+                    <div class="gc_tree_row<?= $folderId === $rootFolderId ? ' is-active' : '' ?>">
+                        <a class="gc_tree_link" data-drop-folder="<?= $rootFolderId ?>" href="<?= gc_h(gc_storage_link($rootFolderId, $sort, $dir, $scope)) ?>">
                             <span class="gc_ico gc_ico--folder"></span>
-                            <span class="gc_tree_name">Корень</span>
-                            <span class="gc_tree_count"><?= $folderCounts[0] ?></span>
+                            <span class="gc_tree_name"><?= gc_h($rootFolderLabel) ?></span>
+                            <span class="gc_tree_count"><?= (int) ($folderCounts[$rootFolderId] ?? 0) ?></span>
                         </a>
                     </div>
-                    <?php $renderTree(0); ?>
+                    <?php $renderTree($rootFolderId); ?>
                 </li>
             </ul>
 
@@ -787,7 +968,8 @@ gc_head('Хранилище', 'storage');
                     <input class="gc_input" type="text" name="folder_name" maxlength="80" required value="<?= gc_h($folderMap[$folderId]['name']) ?>">
                     <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block">Переименовать</button>
                 </form>
-                <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($folderMap[$folderId]['name']) ?>»? Вложенные папки тоже удалятся, файлы переместятся в корень.">
+                <?php if ($scope !== 'personal' || $folderId !== $personalRootId) { ?>
+                <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($folderMap[$folderId]['name']) ?>»? Вложенные папки тоже удалятся, файлы переместятся в <?= $folderMap[$folderId]['parent_id'] > 0 ? 'родительскую папку' : 'корень' ?>.">
                     <?= gc_csrf_field() ?>
                     <input type="hidden" name="action" value="folder_delete">
                     <input type="hidden" name="id" value="<?= $folderId ?>">
@@ -797,6 +979,7 @@ gc_head('Хранилище', 'storage');
                     <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
                     <button type="submit" class="gc_btn gc_btn--ghost gc_btn--sm gc_btn--block gc_text-danger">Удалить папку</button>
                 </form>
+                <?php } ?>
             </details>
             <?php } ?>
 
@@ -818,7 +1001,7 @@ gc_head('Хранилище', 'storage');
         <div class="gc_storage_main" data-drive-view="grid">
             <div class="gc_drive_bar">
                 <div class="gc_crumbs">
-                    <a href="<?= gc_h(gc_storage_link(0, $sort, $dir, $scope)) ?>" data-drop-folder="0">Хранилище</a>
+                    <a href="<?= gc_h(gc_storage_link($rootFolderId, $sort, $dir, $scope)) ?>" data-drop-folder="<?= $rootFolderId ?>">Хранилище</a>
                     <?php foreach ($pathFolders as $index => $pathFolder) { ?>
                     <span class="sep">/</span>
                     <?php if ($index === count($pathFolders) - 1) { ?>
@@ -890,7 +1073,7 @@ gc_head('Хранилище', 'storage');
 
             <details class="gc_upload_panel" id="upload"<?= $files === [] && $childFolders === [] ? ' open' : '' ?>>
                 <summary>
-                    <h2>Загрузить файл</h2>
+                    <h2>Загрузить файлы и папки</h2>
                     <span class="gc_upload_hintline"><?= gc_h($currentName) ?> · <?= gc_h($scopeLabels[$scope]) ?></span>
                     <span class="gc_ico gc_ico--chevron"></span>
                 </summary>
@@ -903,13 +1086,22 @@ gc_head('Хранилище', 'storage');
                     <input type="hidden" name="scope" value="<?= gc_h($scope) ?>">
 
                     <div class="gc_upload_row">
-                        <label class="gc_drop" for="file">
-                            <input type="file" id="file" name="files[]" multiple required>
-                            <span class="gc_drop_icon gc_ico gc_ico--upload" aria-hidden="true"></span>
-                            <strong>Перетащите файлы или выберите</strong>
-                            <span class="gc_drop_file" data-drop-name></span>
-                            <small class="gc_drop_hint" data-drop-hint>Можно несколько · до <?= gc_h($maxSizeLabel) ?> каждый</small>
-                        </label>
+                        <div class="gc_upload_pick">
+                            <label class="gc_drop" for="file">
+                                <input type="file" id="file" name="files[]" multiple>
+                                <span class="gc_drop_icon gc_ico gc_ico--upload" aria-hidden="true"></span>
+                                <strong>Перетащите файлы или папки</strong>
+                                <span class="gc_drop_file" data-drop-name></span>
+                                <small class="gc_drop_hint" data-drop-hint>Можно несколько · до <?= gc_h($maxSizeLabel) ?> каждый</small>
+                            </label>
+                            <div class="gc_upload_pick_foot">
+                                <label class="gc_btn gc_btn--outline gc_btn--sm" for="dir_files">
+                                    <span class="gc_ico gc_ico--folder"></span> Выбрать папку
+                                </label>
+                                <input type="file" id="dir_files" name="dir_files[]" webkitdirectory directory multiple hidden data-folder-input>
+                                <span class="gc_drop_dir_name" data-dir-name></span>
+                            </div>
+                        </div>
 
                         <div>
                             <?php if ($allTags !== []) { ?>
@@ -930,6 +1122,14 @@ gc_head('Хранилище', 'storage');
                                 <label class="gc_label" for="logins">Личный доступ <span class="gc_muted">(логины через запятую)</span></label>
                                 <input class="gc_input" id="logins" type="text" name="logins" placeholder="login1, login2">
                             </div>
+
+                            <p class="gc_upload_note">
+                                <?php if ($scope === 'personal') { ?>
+                                Эти файлы видит только владелец, даже если у них есть теги или личный доступ.
+                                <?php } else { ?>
+                                Без тегов и личного доступа файл попадёт в «Личные файлы» и будет виден только вам.
+                                <?php } ?>
+                            </p>
 
                             <div class="gc_upload_progress" data-upload-progress hidden>
                                 <div class="gc_upload_bar"><span data-upload-bar></span></div>
@@ -990,7 +1190,7 @@ gc_head('Хранилище', 'storage');
                                     data-folder-edit="<?= $childId ?>" data-folder-name="<?= gc_h($child['name']) ?>">
                                 <span class="gc_ico gc_ico--rename"></span>
                             </button>
-                            <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($child['name']) ?>»? Файлы из неё перейдут в корень.">
+                            <form method="post" action="storage.php" data-confirm="Удалить папку «<?= gc_h($child['name']) ?>»? Файлы из неё перейдут в <?= $child['parent_id'] > 0 ? 'родительскую папку' : 'корень' ?>.">
                                 <?= gc_csrf_field() ?>
                                 <input type="hidden" name="action" value="folder_delete">
                                 <input type="hidden" name="id" value="<?= $childId ?>">
