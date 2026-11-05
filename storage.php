@@ -108,6 +108,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $queue = array_values(array_filter($queue, static fn (array $item): bool => $item['error'] !== UPLOAD_ERR_NO_FILE));
 
+        $failUpload = static function (string $message, int $status = 400) use ($respondJson, $returnUrl): void {
+            $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => [$message]], $status);
+            gc_flash('error', $message);
+            gc_redirect($returnUrl);
+        };
+
+        $stagedIds = $_POST['staged_upload'] ?? [];
+        if (is_string($stagedIds)) {
+            $stagedIds = [$stagedIds];
+        }
+        $stagedIds = is_array($stagedIds)
+            ? array_values(array_filter($stagedIds, static fn ($value): bool => is_string($value) && $value !== ''))
+            : [];
+        $stageDir = $uploadDir . '/.staging';
+        foreach ($stagedIds as $stagedId) {
+            if (!preg_match('/^[a-f0-9]{32}$/', $stagedId)) {
+                $failUpload('Некорректный идентификатор загрузки.');
+            }
+            $stagePath = $stageDir . '/' . $stagedId . '.bin';
+            $stageMetaPath = $stageDir . '/' . $stagedId . '.json';
+            $stageRaw = is_file($stageMetaPath) ? @file_get_contents($stageMetaPath) : false;
+            $stageMeta = is_string($stageRaw) ? json_decode($stageRaw, true) : null;
+            if (!is_array($stageMeta) || (int) ($stageMeta['uid'] ?? 0) !== $uid) {
+                $failUpload('Загрузка не найдена или принадлежит другому пользователю.', 404);
+            }
+            if (!is_file($stagePath)) {
+                $failUpload('Временный файл загрузки не найден.', 404);
+            }
+            $stageSize = (int) ($stageMeta['size'] ?? 0);
+            if ($stageSize <= 0 || (int) filesize($stagePath) !== $stageSize) {
+                $failUpload('Размер загруженного файла не совпадает.', 409);
+            }
+            $stageMax = gc_max_upload();
+            if ($stageMax > 0 && $stageSize > $stageMax) {
+                $failUpload('Файл больше допустимого размера ' . gc_size($stageMax) . '.', 413);
+            }
+            $queue[] = [
+                'name' => (string) ($stageMeta['name'] ?? 'file'),
+                'path' => (string) ($stageMeta['path'] ?? $stageMeta['name'] ?? 'file'),
+                'tmp_name' => $stagePath,
+                'error' => UPLOAD_ERR_OK,
+                'size' => $stageSize,
+                'staged' => true,
+                'meta_path' => $stageMetaPath,
+            ];
+        }
+
         if ($queue === []) {
             $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => ['Файл не выбран.']]);
             gc_flash('error', 'Файл не выбран.');
@@ -206,6 +253,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors = [];
         $max = gc_max_upload();
         foreach ($queue as $item) {
+            $isStaged = !empty($item['staged']);
             $label = $item['path'] !== '' ? $item['path'] : ($item['name'] !== '' ? $item['name'] : 'файл');
             if ($item['error'] !== UPLOAD_ERR_OK) {
                 $errors[] = $label . ': ' . gc_upload_error($item['error']);
@@ -215,7 +263,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = $label . ': больше допустимого размера ' . gc_size($max) . '.';
                 continue;
             }
-            if (!is_uploaded_file($item['tmp_name'])) {
+            if (!$isStaged && !is_uploaded_file($item['tmp_name'])) {
                 $errors[] = $label . ': загрузка не подтверждена сервером.';
                 continue;
             }
@@ -227,7 +275,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stored = bin2hex(random_bytes(16)) . ($ext !== '' ? '.' . $ext : '');
             $path = $uploadDir . '/' . $stored;
 
-            if (!move_uploaded_file($item['tmp_name'], $path)) {
+            $placed = $isStaged
+                ? @rename($item['tmp_name'], $path)
+                : move_uploaded_file($item['tmp_name'], $path);
+            if (!$placed) {
                 $errors[] = $label . ': не удалось сохранить на сервере.';
                 continue;
             }
@@ -261,11 +312,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $pdo->commit();
                 $uploaded++;
+                if ($isStaged && !empty($item['meta_path'])) {
+                    @unlink((string) $item['meta_path']);
+                }
             } catch (Throwable $exception) {
                 if ($pdo->inTransaction()) {
                     $pdo->rollBack();
                 }
                 @unlink($path);
+                if ($isStaged && !empty($item['meta_path'])) {
+                    @unlink((string) $item['meta_path']);
+                }
                 $errors[] = $label . ': не удалось сохранить в базе.';
             }
         }

@@ -686,94 +686,556 @@
         }
     }
 
-    /* ---------- multi-file upload with progress ---------- */
+    /* ---------- persistent upload queue ---------- */
 
-    function initUploadProgress() {
+    function initUploadManager() {
         var form = $('[data-upload-form]');
-        if (!form || !window.FormData || !window.XMLHttpRequest) return;
+        var widget = $('[data-upload-widget]');
+        if (!form || !widget || !window.FormData || !window.XMLHttpRequest) return;
+
         var input = form.querySelector('input[name="files[]"]');
         var dirInput = form.querySelector('[data-folder-input]');
+        var csrfInput = form.querySelector('input[name="csrf"]');
         if (!input) return;
-        var progress = form.querySelector('[data-upload-progress]');
-        var bar = form.querySelector('[data-upload-bar]');
-        var percent = form.querySelector('[data-upload-percent]');
-        var status = form.querySelector('[data-upload-status]');
-        var busy = false;
 
-        function appendPaths(data, target, field) {
-            if (!target || !target.files || !target.files.length) return;
-            var files = Array.prototype.slice.call(target.files);
-            var paths = target._gcPaths && target._gcPaths.length === files.length
-                ? target._gcPaths
-                : files.map(function (file) { return file.webkitRelativePath || file.name; });
-            paths.forEach(function (path) { data.append(field + '[]', path); });
+        var toggle = widget.querySelector('[data-upload-toggle]');
+        var close = widget.querySelector('[data-upload-close]');
+        var badge = widget.querySelector('[data-upload-badge]');
+        var titleEl = widget.querySelector('[data-upload-title]');
+        var currentEl = widget.querySelector('[data-upload-current]');
+        var filePercentEl = widget.querySelector('[data-upload-file-percent]');
+        var bar = widget.querySelector('[data-upload-widget-bar]');
+        var fill = widget.querySelector('[data-upload-widget-fill]');
+        var percentEl = widget.querySelector('[data-upload-widget-percent]');
+        var sizeEl = widget.querySelector('[data-upload-widget-size]');
+        var noteEl = widget.querySelector('[data-upload-widget-note]');
+        var list = widget.querySelector('[data-upload-widget-list]');
+        var retry = widget.querySelector('[data-upload-retry]');
+        var refresh = widget.querySelector('[data-upload-refresh]');
+
+        var DB_NAME = 'gc_upload_queue';
+        var STORE = 'items';
+        var CHUNK = 32 * 1024 * 1024;
+        var MAX_FILE = 20 * 1024 * 1024 * 1024;
+        var queue = [];
+        var active = null;
+        var processing = false;
+        var committing = false;
+        var db = null;
+        var dbFailed = false;
+        var doneTimer = 0;
+
+        function uid() {
+            if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID().replace(/-/g, '');
+            var out = '';
+            for (var i = 0; i < 32; i++) out += Math.floor(Math.random() * 16).toString(16);
+            return out;
+        }
+
+        function csrf() {
+            return csrfInput ? csrfInput.value : '';
+        }
+
+        function syncCraft(payload) {
+            if (!payload || typeof payload !== 'object') return null;
+            return payload;
+        }
+
+        function parseJson(text) {
+            try { return JSON.parse(text); } catch (error) { return null; }
+        }
+
+        function blobToBase64(text) {
+            var bytes = new TextEncoder().encode(text);
+            var binary = '';
+            for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary);
+        }
+
+        function openDb() {
+            return new Promise(function (resolve, reject) {
+                if (!window.indexedDB) { reject(new Error('IndexedDB недоступен')); return; }
+                var request = window.indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = function () {
+                    if (!request.result.objectStoreNames.contains(STORE)) {
+                        request.result.createObjectStore(STORE, { keyPath: 'id' });
+                    }
+                };
+                request.onsuccess = function () { resolve(request.result); };
+                request.onerror = function () { reject(request.error || new Error('IndexedDB недоступен')); };
+            });
+        }
+
+        function dbAll() {
+            if (!db) return Promise.resolve([]);
+            return new Promise(function (resolve) {
+                var tx = db.transaction(STORE, 'readonly');
+                var request = tx.objectStore(STORE).getAll();
+                request.onsuccess = function () { resolve(request.result || []); };
+                request.onerror = function () { resolve([]); };
+            });
+        }
+
+        function dbPut(item) {
+            if (!db) return Promise.resolve();
+            return new Promise(function (resolve) {
+                try {
+                    var tx = db.transaction(STORE, 'readwrite');
+                    tx.objectStore(STORE).put(item);
+                    tx.oncomplete = function () { resolve(); };
+                    tx.onerror = function () { resolve(); };
+                } catch (error) {
+                    resolve();
+                }
+            });
+        }
+
+        function dbDelete(id) {
+            if (!db) return Promise.resolve();
+            return new Promise(function (resolve) {
+                try {
+                    var tx = db.transaction(STORE, 'readwrite');
+                    tx.objectStore(STORE).delete(id);
+                    tx.oncomplete = function () { resolve(); };
+                    tx.onerror = function () { resolve(); };
+                } catch (error) {
+                    resolve();
+                }
+            });
+        }
+
+        function dbEmpty() {
+            if (!db) return Promise.resolve();
+            return new Promise(function (resolve) {
+                try {
+                    var tx = db.transaction(STORE, 'readwrite');
+                    tx.objectStore(STORE).clear();
+                    tx.oncomplete = function () { resolve(); };
+                    tx.onerror = function () { resolve(); };
+                } catch (error) {
+                    resolve();
+                }
+            });
+        }
+
+        function setPanel(open) {
+            widget.classList.toggle('is-open', open);
+            if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        function setState(state) {
+            widget.classList.remove('is-idle', 'is-error', 'is-done');
+            if (state) widget.classList.add('is-' + state);
+        }
+
+        function itemsPending() {
+            return queue.filter(function (item) {
+                return item.state !== 'done' && item.state !== 'staged';
+            });
+        }
+
+        function totalBytes() {
+            return queue.reduce(function (sum, item) { return sum + (item.size || 0); }, 0);
+        }
+
+        function uploadedBytes() {
+            return queue.reduce(function (sum, item) {
+                if (item.state === 'done') return sum + item.size;
+                return sum + Math.min(item.offset || 0, item.size || 0);
+            }, 0);
+        }
+
+        function render() {
+            var pending = itemsPending();
+            var total = totalBytes();
+            var loaded = uploadedBytes();
+            var percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+
+            if (badge) {
+                badge.textContent = String(pending.length);
+                badge.hidden = pending.length === 0;
+            }
+            if (!queue.length) {
+                widget.hidden = true;
+                return;
+            }
+            widget.hidden = false;
+
+            if (titleEl) {
+                titleEl.textContent = pending.length
+                    ? 'Осталось ' + pending.length
+                    : 'Готово';
+            }
+            if (currentEl) {
+                currentEl.textContent = active
+                    ? active.name
+                    : (pending.length ? 'Подготовка…' : 'Все файлы загружены');
+            }
+            if (filePercentEl) {
+                var filePercent = active && active.size
+                    ? Math.min(100, Math.round((active.offset || 0) / active.size * 100))
+                    : (pending.length ? 0 : 100);
+                filePercentEl.textContent = filePercent + '%';
+            }
+            if (fill) fill.style.width = percent + '%';
+            if (bar) bar.setAttribute('aria-valuenow', String(percent));
+            if (percentEl) percentEl.textContent = percent + '%';
+            if (sizeEl) sizeEl.textContent = formatSize(loaded) + ' из ' + formatSize(total);
+
+            if (noteEl) {
+                if (widget.classList.contains('is-error')) {
+                    noteEl.textContent = 'Загрузка остановилась. Можно повторить с места остановки.';
+                } else if (!pending.length) {
+                    noteEl.textContent = 'Файлы сохранены в хранилище.';
+                } else {
+                    noteEl.textContent = 'Можно свернуть: загрузка продолжится в фоне.';
+                }
+            }
+
+            if (retry) retry.hidden = !widget.classList.contains('is-error');
+            if (refresh) refresh.hidden = !widget.classList.contains('is-done');
+            if (list) {
+                list.innerHTML = '';
+                queue.slice(-6).forEach(function (item) {
+                    var li = document.createElement('li');
+                    if (item.state === 'done' || item.state === 'staged') li.className = 'is-ok';
+                    if (item.state === 'error') li.className = 'is-error';
+                    var name = document.createElement('span');
+                    name.className = 'gc_upload_item_name';
+                    name.textContent = item.name;
+                    var state = document.createElement('span');
+                    state.className = 'gc_upload_item_state';
+                    state.textContent = item.state === 'done' || item.state === 'staged'
+                        ? 'готово'
+                        : (item.state === 'error' ? 'ошибка' : (item.state === 'uploading' ? 'идёт' : 'в очереди'));
+                    li.appendChild(name);
+                    li.appendChild(state);
+                    list.appendChild(li);
+                });
+            }
+        }
+
+        function save(item) {
+            if (!item) return Promise.resolve();
+            return dbPut(item);
+        }
+
+        function failItem(item, message) {
+            item.state = 'error';
+            item.error = message || 'Не удалось загрузить файл.';
+            save(item);
+            active = null;
+            setState('error');
+            render();
+            if (noteEl) noteEl.textContent = item.error;
+        }
+
+        function getStatus(item) {
+            return fetch('upload_chunk.php?id=' + encodeURIComponent(item.id), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'X-GC-CSRF': csrf() }
+            }).then(function (response) {
+                if (response.status === 404) return null;
+                return response.json().catch(function () { return null; });
+            });
+        }
+
+        function sendChunk(item, blob) {
+            return new Promise(function (resolve, reject) {
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', 'upload_chunk.php?id=' + encodeURIComponent(item.id), true);
+                xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                xhr.setRequestHeader('X-GC-CSRF', csrf());
+                xhr.setRequestHeader('X-GC-OFFSET', String(item.offset));
+                xhr.setRequestHeader('X-GC-TOTAL', String(item.size));
+                xhr.setRequestHeader('X-GC-META', blobToBase64(JSON.stringify({
+                    name: item.name,
+                    path: item.path,
+                    size: item.size
+                })));
+
+                xhr.upload.addEventListener('progress', function (event) {
+                    if (!event.lengthComputable) return;
+                    item.loaded = (item.offset || 0) + event.loaded;
+                    if (active === item) {
+                        if (filePercentEl) {
+                            filePercentEl.textContent = Math.min(100, Math.round(item.loaded / item.size * 100)) + '%';
+                        }
+                        var total = totalBytes();
+                        var loaded = uploadedBytes() - (item.offset || 0) + item.loaded;
+                        var percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+                        if (fill) fill.style.width = percent + '%';
+                        if (bar) bar.setAttribute('aria-valuenow', String(percent));
+                        if (percentEl) percentEl.textContent = percent + '%';
+                        if (sizeEl) sizeEl.textContent = formatSize(loaded) + ' из ' + formatSize(total);
+                    }
+                });
+
+                xhr.addEventListener('load', function () {
+                    var payload = parseJson(xhr.responseText);
+                    if (xhr.status === 409 && payload && typeof payload.offset === 'number') {
+                        resolve({ conflict: true, offset: payload.offset });
+                        return;
+                    }
+                    if (xhr.status >= 200 && xhr.status < 300 && payload && payload.ok) {
+                        resolve(payload);
+                        return;
+                    }
+                    reject(new Error(payload && payload.error ? payload.error : 'Сервер отклонил часть файла (HTTP ' + xhr.status + ').'));
+                });
+                xhr.addEventListener('error', function () {
+                    reject(new Error('Сеть недоступна. Загрузка продолжится после повтора.'));
+                });
+                xhr.send(blob);
+            });
+        }
+
+        function uploadItem(item) {
+            item.state = 'uploading';
+            item.error = '';
+            active = item;
+            setState('uploading');
+            render();
+            return save(item).then(function () {
+                return getStatus(item).catch(function () { return null; });
+            }).then(function (status) {
+                if (status && status.ok && status.done) {
+                    item.state = 'staged';
+                    item.stagedId = status.staged;
+                    item.offset = item.size;
+                    return save(item);
+                }
+                if (status && status.ok && typeof status.offset === 'number') {
+                    item.offset = Math.max(item.offset || 0, status.offset);
+                }
+                return pump(item);
+            }).catch(function (error) {
+                failItem(item, error && error.message ? error.message : 'Не удалось загрузить файл.');
+            });
+        }
+
+        function pump(item) {
+            if (item.offset >= item.size) {
+                return getStatus(item).then(function (status) {
+                    if (status && status.ok && status.done) {
+                        item.state = 'staged';
+                        item.stagedId = status.staged;
+                        item.offset = item.size;
+                        save(item);
+                        return;
+                    }
+                    throw new Error('Файл передан, но сервер не подтвердил его. Повторите загрузку.');
+                });
+            }
+            var end = Math.min(item.size, item.offset + CHUNK);
+            var blob = item.file.slice(item.offset, end);
+            return sendChunk(item, blob).then(function (payload) {
+                if (payload.conflict) {
+                    item.offset = payload.offset;
+                    save(item);
+                    return pump(item);
+                }
+                if (payload.done) {
+                    item.state = 'staged';
+                    item.stagedId = payload.staged;
+                    item.offset = item.size;
+                    save(item);
+                    return;
+                }
+                item.offset = typeof payload.offset === 'number' ? payload.offset : end;
+                item.loaded = item.offset;
+                save(item);
+                return pump(item);
+            });
+        }
+
+        function commitQueue() {
+            if (committing) return;
+            var staged = queue.filter(function (item) { return item.state === 'staged' && item.stagedId; });
+            if (!staged.length) return;
+            committing = true;
+            var data = new FormData(form);
+            staged.forEach(function (item) { data.append('staged_upload[]', item.stagedId); });
+            data.append('ajax', '1');
+
+            fetch(form.getAttribute('action') || window.location.href, {
+                method: 'POST',
+                body: data,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            }).then(function (response) {
+                return response.json().catch(function () { return null; });
+            }).then(function (payload) {
+                if (!payload || !payload.ok) {
+                    throw new Error(payload && payload.errors && payload.errors.length
+                        ? payload.errors[0]
+                        : 'Не удалось сохранить файлы в хранилище.');
+                }
+                return Promise.all(queue.map(function (item) { return dbDelete(item.id); })).then(function () {
+                    queue = [];
+                    setState('done');
+                    render();
+                    if (payload.redirect) {
+                        window.setTimeout(function () { window.location.href = payload.redirect; }, 300);
+                    }
+                });
+            }).catch(function (error) {
+                committing = false;
+                staged.forEach(function (item) {
+                    item.state = 'staged';
+                });
+                setState('error');
+                if (retry) retry.hidden = false;
+                render();
+                if (noteEl) noteEl.textContent = error.message || 'Файлы переданы, но не сохранены. Повторите.';
+            });
+        }
+
+        function runQueue() {
+            if (processing || committing) return;
+            processing = true;
+            var next = function () {
+                var item = null;
+                for (var i = 0; i < queue.length; i++) {
+                    if (queue[i].state === 'queued') { item = queue[i]; break; }
+                }
+                if (!item) {
+                    processing = false;
+                    active = null;
+                    var staged = queue.filter(function (entry) { return entry.state === 'staged'; });
+                    if (staged.length && staged.length === queue.length) {
+                        commitQueue();
+                    } else {
+                        render();
+                    }
+                    return;
+                }
+                uploadItem(item).then(function () {
+                    if (item.state === 'error') {
+                        processing = false;
+                        return;
+                    }
+                    next();
+                });
+            };
+            next();
+        }
+
+        function enqueue(files) {
+            var now = Date.now();
+            var added = 0;
+            files.forEach(function (entry) {
+                var file = entry.file;
+                if (!file) return;
+                if (file.size > MAX_FILE) {
+                    window.alert('Файл «' + file.name + '» больше 20 ГБ.');
+                    return;
+                }
+                queue.push({
+                    id: uid(),
+                    name: file.name,
+                    path: entry.path || file.webkitRelativePath || file.name,
+                    size: file.size,
+                    offset: 0,
+                    loaded: 0,
+                    state: 'queued',
+                    error: '',
+                    stagedId: '',
+                    createdAt: now + added,
+                    file: file
+                });
+                added++;
+            });
+            if (!added) return;
+            queue.slice(-added).forEach(function (item) { save(item); });
+            widget.hidden = false;
+            setState('uploading');
+            setPanel(true);
+            render();
+            runQueue();
+        }
+
+        function collectFiles() {
+            var entries = [];
+            var sources = [
+                { input: input, field: 'paths' },
+                { input: dirInput, field: 'dir_paths' }
+            ];
+            sources.forEach(function (source) {
+                if (!source.input || !source.input.files) return;
+                var files = Array.prototype.slice.call(source.input.files);
+                var paths = source.input._gcPaths && source.input._gcPaths.length === files.length
+                    ? source.input._gcPaths
+                    : files.map(function (file) { return file.webkitRelativePath || file.name; });
+                files.forEach(function (file, index) {
+                    entries.push({ file: file, path: paths[index] || file.name });
+                });
+            });
+            return entries;
         }
 
         form.addEventListener('submit', function (event) {
-            if (busy) {
-                event.preventDefault();
+            var entries = collectFiles();
+            if (!entries.length) return;
+            event.preventDefault();
+            if (!csrf()) {
+                window.alert('Сессия устарела. Обновите страницу.');
                 return;
             }
-            var hasFiles = (input.files && input.files.length)
-                || (dirInput && dirInput.files && dirInput.files.length);
-            if (!hasFiles) return;
-            event.preventDefault();
-            busy = true;
+            input.value = '';
+            if (dirInput) dirInput.value = '';
+            input._gcPaths = [];
+            if (dirInput) dirInput._gcPaths = [];
+            enqueue(entries);
+        });
 
-            if (progress) progress.hidden = false;
-            if (bar) bar.style.width = '0%';
-            if (percent) percent.textContent = '0%';
-            if (status) status.textContent = 'Загрузка…';
-
-            var data = new FormData(form);
-            appendPaths(data, input, 'paths');
-            appendPaths(data, dirInput, 'dir_paths');
-            data.append('ajax', '1');
-            var xhr = new XMLHttpRequest();
-            /* form.action is shadowed by the hidden input named "action". */
-            xhr.open('POST', form.getAttribute('action') || window.location.href, true);
-            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-
-            xhr.upload.addEventListener('progress', function (uploadEvent) {
-                if (!uploadEvent.lengthComputable) return;
-                var value = Math.round((uploadEvent.loaded / uploadEvent.total) * 100);
-                if (bar) bar.style.width = value + '%';
-                if (percent) percent.textContent = value + '%';
-                if (status) status.textContent = value < 100 ? 'Загрузка…' : 'Обработка на сервере…';
+        if (toggle) {
+            toggle.addEventListener('click', function () {
+                setPanel(!widget.classList.contains('is-open'));
             });
-
-            xhr.addEventListener('load', function () {
-                var payload = null;
-                try {
-                    payload = JSON.parse(xhr.responseText);
-                } catch (error) {
-                    payload = null;
-                }
-                if (xhr.status >= 200 && xhr.status < 300 && payload && payload.ok) {
-                    if (bar) bar.style.width = '100%';
-                    if (percent) percent.textContent = '100%';
-                    if (status) status.textContent = payload.message || 'Готово';
-                    window.location.href = payload.redirect || window.location.href;
-                    return;
-                }
-                busy = false;
-                if (bar) bar.style.width = '0%';
-                if (percent) percent.textContent = '0%';
-                if (status) {
-                    status.textContent = payload && payload.errors && payload.errors.length
-                        ? payload.errors[0]
-                        : 'Не удалось загрузить файлы.';
-                }
+        }
+        if (close) close.addEventListener('click', function () { setPanel(false); });
+        if (retry) {
+            retry.addEventListener('click', function () {
+                queue.forEach(function (item) {
+                    if (item.state === 'error') {
+                        item.state = 'queued';
+                        item.error = '';
+                        save(item);
+                    }
+                });
+                if (noteEl) noteEl.textContent = 'Продолжаем с места остановки…';
+                setState('uploading');
+                render();
+                runQueue();
             });
-
-            xhr.addEventListener('error', function () {
-                busy = false;
-                if (bar) bar.style.width = '0%';
-                if (percent) percent.textContent = '0%';
-                if (status) status.textContent = 'Сеть недоступна, попробуйте ещё раз.';
+        }
+        if (refresh) {
+            refresh.addEventListener('click', function (event) {
+                event.preventDefault();
+                window.location.reload();
             });
+        }
 
-            xhr.send(data);
+        openDb().then(function (database) {
+            db = database;
+            return dbAll();
+        }).catch(function () {
+            dbFailed = true;
+            return [];
+        }).then(function (items) {
+            queue = (items || []).filter(function (item) {
+                return item && item.file && item.id;
+            }).map(function (item) {
+                if (item.state === 'uploading') item.state = 'queued';
+                return item;
+            });
+            if (!queue.length) return;
+            widget.hidden = false;
+            setState('uploading');
+            render();
+            runQueue();
         });
     }
 
@@ -907,7 +1369,7 @@
         initFileDrag();
         initTagDialogs();
         initPreviewDialog();
-        initUploadProgress();
+        initUploadManager();
     }
 
     if (document.readyState === 'loading') {

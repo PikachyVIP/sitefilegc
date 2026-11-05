@@ -192,6 +192,42 @@ function gc_foot(array $options = []): void
         gc_footer();
     }
     ?>
+<?php if (gc_user() !== null) { ?>
+<div class="gc_upload_widget" id="gcUploadWidget" data-upload-widget hidden>
+    <button type="button" class="gc_upload_widget_toggle" data-upload-toggle aria-expanded="false" aria-label="Очередь загрузки">
+        <span class="loader" aria-hidden="true"></span>
+        <span class="gc_upload_widget_badge" data-upload-badge hidden>0</span>
+    </button>
+    <section class="gc_upload_widget_panel" aria-label="Очередь загрузки">
+        <header class="gc_upload_widget_head">
+            <div>
+                <span class="gc_upload_widget_eyebrow">Передача</span>
+                <strong data-upload-title>Загрузка</strong>
+            </div>
+            <button type="button" class="gc_iconbtn" data-upload-close aria-label="Свернуть">
+                <span class="gc_ico gc_ico--close"></span>
+            </button>
+        </header>
+        <div class="gc_upload_widget_current">
+            <span data-upload-current>Подготовка…</span>
+            <span data-upload-file-percent>0%</span>
+        </div>
+        <div class="gc_upload_widget_bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-upload-widget-bar>
+            <span data-upload-widget-fill></span>
+        </div>
+        <div class="gc_upload_widget_meta">
+            <span data-upload-widget-percent>0%</span>
+            <span data-upload-widget-size></span>
+        </div>
+        <p class="gc_upload_widget_note" data-upload-widget-note>Можно свернуть: загрузка продолжится в фоне.</p>
+        <ul class="gc_upload_widget_list" data-upload-widget-list></ul>
+        <div class="gc_upload_widget_actions">
+            <button type="button" class="gc_btn gc_btn--outline gc_btn--sm" data-upload-retry hidden>Повторить</button>
+            <a class="gc_btn gc_btn--primary gc_btn--sm" data-upload-refresh hidden href="#">Обновить</a>
+        </div>
+    </section>
+</div>
+<?php } ?>
 <script src="assets/js/app.js?v=<?= rawurlencode(GC_ASSET_VERSION) ?>" defer></script>
 </body>
 </html>
