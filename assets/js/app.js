@@ -1151,7 +1151,6 @@
             queue.slice(-added).forEach(function (item) { save(item); });
             widget.hidden = false;
             setState('uploading');
-            setPanel(true);
             render();
             runQueue();
         }
