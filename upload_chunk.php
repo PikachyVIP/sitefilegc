@@ -35,8 +35,8 @@ if (!is_string($sentCsrf) || $sentCsrf === '' || !hash_equals(gc_csrf_token(), $
 }
 
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
-if (!in_array($method, ['GET', 'POST'], true)) {
-    header('Allow: GET, POST');
+if (!in_array($method, ['GET', 'POST', 'DELETE'], true)) {
+    header('Allow: GET, POST, DELETE');
     gc_chunk_json(['ok' => false, 'error' => 'Метод не поддерживается.'], 405);
 }
 
@@ -108,6 +108,26 @@ try {
             ]);
         }
         gc_chunk_json(['ok' => true, 'done' => false, 'offset' => $offset, 'total' => $total]);
+    }
+
+    if ($method === 'DELETE') {
+        $partMeta = $readMeta($metaPath);
+        $stageMeta = $readMeta($stageMetaPath);
+        if ($partMeta !== null && (int) ($partMeta['uid'] ?? 0) !== $uid) {
+            gc_chunk_json(['ok' => false, 'error' => 'Загрузка принадлежит другому пользователю.'], 403);
+        }
+        if ($stageMeta !== null && (int) ($stageMeta['uid'] ?? 0) !== $uid) {
+            gc_chunk_json(['ok' => false, 'error' => 'Загрузка принадлежит другому пользователю.'], 403);
+        }
+        if ($partMeta === null && $stageMeta === null) {
+            gc_chunk_json(['ok' => true, 'deleted' => false]);
+        }
+
+        @unlink($partPath);
+        @unlink($metaPath);
+        @unlink($stagePath);
+        @unlink($stageMetaPath);
+        gc_chunk_json(['ok' => true, 'deleted' => true]);
     }
 
     $offset = isset($_SERVER['HTTP_X_GC_OFFSET']) ? (int) $_SERVER['HTTP_X_GC_OFFSET'] : -1;

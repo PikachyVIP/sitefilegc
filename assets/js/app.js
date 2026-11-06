@@ -758,19 +758,26 @@
         var noteEl = widget.querySelector('[data-upload-widget-note]');
         var list = widget.querySelector('[data-upload-widget-list]');
         var retry = widget.querySelector('[data-upload-retry]');
+        var clear = widget.querySelector('[data-upload-clear]');
         var refresh = widget.querySelector('[data-upload-refresh]');
 
         var DB_NAME = 'gc_upload_queue';
         var STORE = 'items';
         var CHUNK = 32 * 1024 * 1024;
         var MAX_FILE = 20 * 1024 * 1024 * 1024;
+        var MAX_ATTEMPTS = 3;
         var queue = [];
         var active = null;
         var processing = false;
         var committing = false;
         var db = null;
         var dbFailed = false;
-        var doneTimer = 0;
+        var currentXhr = null;
+        var clearing = false;
+        var notice = '';
+        var noticeUntil = 0;
+        var hideTimer = 0;
+        var commitAttempts = 0;
 
         function uid() {
             if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID().replace(/-/g, '');
@@ -903,7 +910,23 @@
                 badge.hidden = pending.length === 0;
             }
             if (!queue.length) {
-                widget.hidden = true;
+                if (!notice || noticeUntil <= Date.now()) {
+                    widget.hidden = true;
+                    return;
+                }
+                widget.hidden = false;
+                if (titleEl) titleEl.textContent = 'Очередь очищена';
+                if (currentEl) currentEl.textContent = '';
+                if (filePercentEl) filePercentEl.textContent = '0%';
+                if (fill) fill.style.width = '0%';
+                if (bar) bar.setAttribute('aria-valuenow', '0');
+                if (percentEl) percentEl.textContent = '0%';
+                if (sizeEl) sizeEl.textContent = '';
+                if (noteEl) noteEl.textContent = notice;
+                if (retry) retry.hidden = true;
+                if (clear) clear.hidden = true;
+                if (refresh) refresh.hidden = true;
+                if (list) list.innerHTML = '';
                 return;
             }
             widget.hidden = false;
@@ -930,7 +953,9 @@
             if (sizeEl) sizeEl.textContent = formatSize(loaded) + ' из ' + formatSize(total);
 
             if (noteEl) {
-                if (widget.classList.contains('is-error')) {
+                if (notice) {
+                    noteEl.textContent = notice;
+                } else if (widget.classList.contains('is-error')) {
                     noteEl.textContent = 'Загрузка остановилась. Можно повторить с места остановки.';
                 } else if (!pending.length) {
                     noteEl.textContent = 'Файлы сохранены в хранилище.';
@@ -940,6 +965,7 @@
             }
 
             if (retry) retry.hidden = !widget.classList.contains('is-error');
+            if (clear) clear.hidden = queue.length === 0;
             if (refresh) refresh.hidden = !widget.classList.contains('is-done');
             if (list) {
                 list.innerHTML = '';
@@ -967,14 +993,125 @@
             return dbPut(item);
         }
 
+        function deleteRemote(item) {
+            if (!item || !item.id) return Promise.resolve();
+            return fetch('upload_chunk.php?id=' + encodeURIComponent(item.id), {
+                method: 'DELETE',
+                credentials: 'same-origin',
+                keepalive: true,
+                headers: { 'X-GC-CSRF': csrf() }
+            }).then(function (response) {
+                return response.json().catch(function () { return null; });
+            }).catch(function () { return null; });
+        }
+
+        function scheduleNoticeHide() {
+            if (hideTimer) window.clearTimeout(hideTimer);
+            hideTimer = window.setTimeout(function () {
+                if (queue.length) {
+                    notice = '';
+                    noticeUntil = 0;
+                    render();
+                    return;
+                }
+                notice = '';
+                noticeUntil = 0;
+                widget.hidden = true;
+            }, 4500);
+        }
+
+        function dropItem(item, message) {
+            item.state = 'error';
+            var index = queue.indexOf(item);
+            if (index >= 0) queue.splice(index, 1);
+            dbDelete(item.id);
+            deleteRemote(item);
+            active = null;
+            notice = message || '';
+            noticeUntil = notice ? Date.now() + 4500 : 0;
+            if (!queue.length) {
+                setState('done');
+                render();
+                scheduleNoticeHide();
+                return;
+            }
+            setState('uploading');
+            render();
+            scheduleNoticeHide();
+            window.setTimeout(function () { runQueue(); }, 0);
+        }
+
+        function clearTransfer(message) {
+            if (clearing) return;
+            if (!queue.length) {
+                widget.hidden = true;
+                return;
+            }
+            clearing = true;
+            if (hideTimer) {
+                window.clearTimeout(hideTimer);
+                hideTimer = 0;
+            }
+            notice = message || '';
+            noticeUntil = notice ? Date.now() + 4500 : 0;
+            var items = queue.slice();
+            queue = [];
+            active = null;
+            processing = false;
+            committing = false;
+            commitAttempts = 0;
+            if (currentXhr) {
+                try { currentXhr.abort(); } catch (error) { /* already finished */ }
+                currentXhr = null;
+            }
+            dbEmpty();
+            items.forEach(function (item) {
+                deleteRemote(item);
+                window.setTimeout(function () { deleteRemote(item); }, 700);
+            });
+            setPanel(false);
+            if (notice) {
+                setState('done');
+                render();
+                scheduleNoticeHide();
+            } else {
+                setState('idle');
+                widget.hidden = true;
+                render();
+            }
+            window.setTimeout(function () { clearing = false; }, 0);
+        }
+
+        function scheduleAutoRetry(item) {
+            window.setTimeout(function () {
+                if (clearing || item.state !== 'error' || queue.indexOf(item) < 0) return;
+                if ((item.attempts || 0) >= MAX_ATTEMPTS) return;
+                item.state = 'queued';
+                item.error = '';
+                save(item);
+                notice = '';
+                noticeUntil = 0;
+                setState('uploading');
+                render();
+                runQueue();
+            }, 3000);
+        }
+
         function failItem(item, message) {
+            if (clearing || !queue.length) return;
             item.state = 'error';
             item.error = message || 'Не удалось загрузить файл.';
+            if ((item.attempts || 0) >= MAX_ATTEMPTS) {
+                dropItem(item, 'Файл «' + item.name + '» не загрузился после ' + MAX_ATTEMPTS + ' попыток и удалён из очереди.');
+                return;
+            }
+            item.error += ' Попытка ' + item.attempts + ' из ' + MAX_ATTEMPTS + '. Повторю автоматически.';
             save(item);
             active = null;
             setState('error');
             render();
             if (noteEl) noteEl.textContent = item.error;
+            scheduleAutoRetry(item);
         }
 
         function getStatus(item) {
@@ -991,6 +1128,10 @@
         function sendChunk(item, blob) {
             return new Promise(function (resolve, reject) {
                 var xhr = new XMLHttpRequest();
+                currentXhr = xhr;
+                var finish = function () {
+                    if (currentXhr === xhr) currentXhr = null;
+                };
                 xhr.open('POST', 'upload_chunk.php?id=' + encodeURIComponent(item.id), true);
                 xhr.setRequestHeader('Content-Type', 'application/octet-stream');
                 xhr.setRequestHeader('X-GC-CSRF', csrf());
@@ -1020,6 +1161,7 @@
                 });
 
                 xhr.addEventListener('load', function () {
+                    finish();
                     var payload = parseJson(xhr.responseText);
                     if (xhr.status === 409 && payload && typeof payload.offset === 'number') {
                         resolve({ conflict: true, offset: payload.offset });
@@ -1032,21 +1174,33 @@
                     reject(new Error(payload && payload.error ? payload.error : 'Сервер отклонил часть файла (HTTP ' + xhr.status + ').'));
                 });
                 xhr.addEventListener('error', function () {
+                    finish();
                     reject(new Error('Сеть недоступна. Загрузка продолжится после повтора.'));
+                });
+                xhr.addEventListener('abort', function () {
+                    finish();
+                    reject(new Error('Загрузка отменена.'));
                 });
                 xhr.send(blob);
             });
         }
 
         function uploadItem(item) {
+            if (clearing) return Promise.resolve();
+            item.attempts = (item.attempts || 0) + 1;
             item.state = 'uploading';
             item.error = '';
+            notice = '';
+            noticeUntil = 0;
             active = item;
             setState('uploading');
             render();
             return save(item).then(function () {
                 return getStatus(item).catch(function () { return null; });
             }).then(function (status) {
+                if (clearing || queue.indexOf(item) < 0) {
+                    throw new Error('Загрузка отменена.');
+                }
                 if (status && status.ok && status.done) {
                     item.state = 'staged';
                     item.stagedId = status.staged;
@@ -1063,8 +1217,14 @@
         }
 
         function pump(item) {
+            if (clearing || queue.indexOf(item) < 0) {
+                return Promise.reject(new Error('Загрузка отменена.'));
+            }
             if (item.offset >= item.size) {
                 return getStatus(item).then(function (status) {
+                    if (clearing || queue.indexOf(item) < 0) {
+                        throw new Error('Загрузка отменена.');
+                    }
                     if (status && status.ok && status.done) {
                         item.state = 'staged';
                         item.stagedId = status.staged;
@@ -1078,6 +1238,9 @@
             var end = Math.min(item.size, item.offset + CHUNK);
             var blob = item.file.slice(item.offset, end);
             return sendChunk(item, blob).then(function (payload) {
+                if (clearing || queue.indexOf(item) < 0) {
+                    throw new Error('Загрузка отменена.');
+                }
                 if (payload.conflict) {
                     item.offset = payload.offset;
                     save(item);
@@ -1121,6 +1284,7 @@
                 }
                 return Promise.all(queue.map(function (item) { return dbDelete(item.id); })).then(function () {
                     queue = [];
+                    commitAttempts = 0;
                     setState('done');
                     render();
                     if (payload.redirect) {
@@ -1129,13 +1293,21 @@
                 });
             }).catch(function (error) {
                 committing = false;
+                commitAttempts++;
+                if (commitAttempts >= MAX_ATTEMPTS) {
+                    clearTransfer('Файлы не сохранились после ' + MAX_ATTEMPTS + ' попыток. Очередь очищена.');
+                    return;
+                }
                 staged.forEach(function (item) {
                     item.state = 'staged';
                 });
                 setState('error');
                 if (retry) retry.hidden = false;
                 render();
-                if (noteEl) noteEl.textContent = error.message || 'Файлы переданы, но не сохранены. Повторите.';
+                if (noteEl) {
+                    noteEl.textContent = (error.message || 'Файлы переданы, но не сохранены. Повторите.')
+                        + ' Попытка ' + commitAttempts + ' из ' + MAX_ATTEMPTS + '.';
+                }
             });
         }
 
@@ -1172,6 +1344,12 @@
         function enqueue(files) {
             var now = Date.now();
             var added = 0;
+            notice = '';
+            noticeUntil = 0;
+            if (hideTimer) {
+                window.clearTimeout(hideTimer);
+                hideTimer = 0;
+            }
             files.forEach(function (entry) {
                 var file = entry.file;
                 if (!file) return;
@@ -1186,6 +1364,7 @@
                     size: file.size,
                     offset: 0,
                     loaded: 0,
+                    attempts: 0,
                     state: 'queued',
                     error: '',
                     stagedId: '',
@@ -1242,6 +1421,13 @@
             });
         }
         if (close) close.addEventListener('click', function () { setPanel(false); });
+        if (clear) {
+            clear.addEventListener('click', function () {
+                if (!queue.length) return;
+                if (!window.confirm('Очистить очередь? Незавершённые файлы будут удалены, временные части — с сервера.')) return;
+                clearTransfer('');
+            });
+        }
         if (retry) {
             retry.addEventListener('click', function () {
                 queue.forEach(function (item) {
@@ -1275,6 +1461,7 @@
                 return item && item.file && item.id;
             }).map(function (item) {
                 if (item.state === 'uploading') item.state = 'queued';
+                item.attempts = Math.max(0, Math.min(MAX_ATTEMPTS - 1, Number(item.attempts) || 0));
                 return item;
             });
             if (!queue.length) return;

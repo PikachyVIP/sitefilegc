@@ -223,6 +223,7 @@ function gc_foot(array $options = []): void
         <ul class="gc_upload_widget_list" data-upload-widget-list></ul>
         <div class="gc_upload_widget_actions">
             <button type="button" class="gc_btn gc_btn--outline gc_btn--sm" data-upload-retry hidden>Повторить</button>
+            <button type="button" class="gc_btn gc_btn--outline gc_btn--sm" data-upload-clear hidden>Очистить</button>
             <a class="gc_btn gc_btn--primary gc_btn--sm" data-upload-refresh hidden href="#">Обновить</a>
         </div>
     </section>
