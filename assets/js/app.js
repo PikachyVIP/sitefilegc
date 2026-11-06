@@ -513,15 +513,18 @@
         var form = document.getElementById('gcMoveForm');
         if (!form) return;
         var folders = $$('[data-drop-folder]');
-        var cards = $$('[data-file-id][draggable="true"]');
+        var files = $$('[data-file-card][draggable="true"]');
+        var folderCards = $$('[data-folder-card][draggable="true"]');
+        var cards = files.concat(folderCards);
         if (!folders.length || !cards.length) return;
 
-        var draggedId = null;
+        var dragged = null;
         var idField = form.querySelector('[name="id"]');
         var targetField = form.querySelector('[name="target_folder"]');
+        var actionField = form.querySelector('[name="action"]');
 
         function clear() {
-            draggedId = null;
+            dragged = null;
             cards.forEach(function (card) { card.classList.remove('is-dragging'); });
             folders.forEach(function (folder) {
                 folder.classList.remove('is-drop-ready');
@@ -529,26 +532,40 @@
             });
         }
 
-        cards.forEach(function (card) {
-            card.addEventListener('dragstart', function (event) {
-                draggedId = card.getAttribute('data-file-id');
-                card.classList.add('is-dragging');
-                folders.forEach(function (folder) { folder.classList.add('is-drop-ready'); });
-                if (event.dataTransfer) {
-                    event.dataTransfer.effectAllowed = 'move';
-                    try {
-                        event.dataTransfer.setData('text/plain', draggedId);
-                    } catch (error) {
-                        /* some browsers restrict the payload */
-                    }
+        function start(card, kind, event) {
+            if (event.target.closest('button, .gc_iconbtn')) {
+                event.preventDefault();
+                return;
+            }
+            var id = card.getAttribute(kind === 'folder' ? 'data-folder-id' : 'data-file-id');
+            if (!id) return;
+            dragged = { kind: kind, id: id };
+            card.classList.add('is-dragging');
+            folders.forEach(function (folder) { folder.classList.add('is-drop-ready'); });
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                try {
+                    event.dataTransfer.setData('text/plain', kind + ':' + id);
+                } catch (error) {
+                    /* some browsers restrict the payload */
                 }
-            });
+            }
+        }
+
+        files.forEach(function (card) {
+            card.addEventListener('dragstart', function (event) { start(card, 'file', event); });
+            card.addEventListener('dragend', clear);
+        });
+
+        folderCards.forEach(function (card) {
+            card.addEventListener('dragstart', function (event) { start(card, 'folder', event); });
             card.addEventListener('dragend', clear);
         });
 
         folders.forEach(function (folder) {
             folder.addEventListener('dragover', function (event) {
-                if (draggedId === null) return;
+                if (dragged === null) return;
+                if (dragged.kind === 'folder' && folder.getAttribute('data-drop-folder') === dragged.id) return;
                 event.preventDefault();
                 if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
                 folder.classList.add('is-drop-target');
@@ -558,11 +575,13 @@
                 folder.classList.remove('is-drop-target');
             });
             folder.addEventListener('drop', function (event) {
-                if (draggedId === null) return;
-                event.preventDefault();
+                if (dragged === null) return;
                 var target = folder.getAttribute('data-drop-folder');
-                if (!target || !idField || !targetField) return;
-                idField.value = draggedId;
+                if (dragged.kind === 'folder' && target === dragged.id) return;
+                event.preventDefault();
+                if (!target || !idField || !targetField || !actionField) return;
+                actionField.value = dragged.kind === 'folder' ? 'folder_move' : 'file_move';
+                idField.value = dragged.id;
                 targetField.value = target;
                 clear();
                 form.submit();

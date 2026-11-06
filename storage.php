@@ -55,7 +55,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         };
 
         $targetFolder = $returnFolder;
-        if ($returnScope === 'personal') {
+        if ($returnScope === 'personal' && $targetFolder <= 0) {
             $targetFolder = $personalRootId;
         }
         if ($targetFolder > 0) {
@@ -204,7 +204,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $personalUpload = $returnScope === 'personal';
-        if (!$personalUpload && $tagIds === [] && $loginIds === []) {
+        if (!$personalUpload && $tagIds === [] && $loginIds === [] && $targetFolder <= 0) {
             $personalUpload = true;
             $targetFolder = $personalRootId;
         }
@@ -219,12 +219,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             foreach ($parts as $part) {
                 $statement = $pdo->prepare('SELECT id FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? LIMIT 1');
-                $statement->execute([$parent, $part, $personalUpload]);
+                $statement->execute([$parent, $part, $personalUpload ? 'true' : 'false']);
                 $folderId = (int) $statement->fetchColumn();
                 if ($folderId <= 0) {
                     try {
                         $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by, is_personal) VALUES (?, ?, ?, ?) RETURNING id');
-                        $statement->execute([$part, $parent > 0 ? $parent : null, $uid, $personalUpload]);
+                        $statement->execute([$part, $parent > 0 ? $parent : null, $uid, $personalUpload ? 'true' : 'false']);
                         $folderId = (int) $statement->fetchColumn();
                         if ($tagIds !== []) {
                             $tagStatement = $pdo->prepare('INSERT INTO folder_tags (folder_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING');
@@ -234,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                     } catch (Throwable $exception) {
                         $statement = $pdo->prepare('SELECT id FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? LIMIT 1');
-                        $statement->execute([$parent, $part, $personalUpload]);
+                        $statement->execute([$parent, $part, $personalUpload ? 'true' : 'false']);
                         $folderId = (int) $statement->fetchColumn();
                         if ($folderId <= 0) {
                             throw $exception;
@@ -377,14 +377,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ?');
-        $statement->execute([$parentId, $name, $parentPersonal]);
+        $statement->execute([$parentId, $name, $parentPersonal ? 'true' : 'false']);
         if ($statement->fetchColumn()) {
             gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
             gc_redirect($returnUrl);
         }
 
         $statement = $pdo->prepare('INSERT INTO folders (name, parent_id, created_by, is_personal) VALUES (?, ?, ?, ?) RETURNING id');
-        $statement->execute([$name, $parentId > 0 ? $parentId : null, $uid, $parentPersonal]);
+        $statement->execute([$name, $parentId > 0 ? $parentId : null, $uid, $parentPersonal ? 'true' : 'false']);
         $newFolderId = (int) $statement->fetchColumn();
 
         gc_flash('ok', 'Папка «' . $name . '» создана.');
@@ -417,7 +417,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $parentId = (int) ($folderRow['parent_id'] ?? 0);
         $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? AND id <> ?');
-        $statement->execute([$parentId, $name, $isPersonalFolder, $id]);
+        $statement->execute([$parentId, $name, $isPersonalFolder ? 'true' : 'false', $id]);
         if ($statement->fetchColumn()) {
             gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
             gc_redirect($returnUrl);
@@ -650,11 +650,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 gc_redirect($returnUrl);
             }
             $targetPersonal = gc_bool_value($targetRow['is_personal']);
+            if ($targetPersonal !== $sourcePersonal) {
+                gc_flash('error', 'Нельзя смешивать личные и общие файлы.');
+                gc_redirect($returnUrl);
+            }
             if ($targetPersonal && ((int) $targetRow['created_by'] !== $uid || (int) $fileRow['uploader_id'] !== $uid)) {
                 gc_flash('error', 'В личную папку можно переместить только свой файл.');
                 gc_redirect($returnUrl);
             }
             $targetLabel = 'в «' . (string) $targetRow['name'] . '»';
+        } elseif ($sourcePersonal) {
+            if ($personalRootId <= 0) {
+                gc_flash('error', 'Личный корень не найден.');
+                gc_redirect($returnUrl);
+            }
+            $targetFolder = (int) $personalRootId;
+            $targetLabel = 'в корень «Личные файлы»';
         }
 
         $currentFolder = $fileRow['folder_id'] !== null ? (int) $fileRow['folder_id'] : 0;
@@ -666,6 +677,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->prepare('UPDATE files SET folder_id = ? WHERE id = ?')
             ->execute([$targetFolder > 0 ? $targetFolder : null, $id]);
         gc_flash('ok', 'Файл «' . (string) $fileRow['original_name'] . '» перемещён ' . $targetLabel . '.');
+        gc_redirect($returnUrl);
+    }
+
+    if ($action === 'folder_move') {
+        $id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+        $targetFolder = isset($_POST['target_folder']) ? (int) $_POST['target_folder'] : 0;
+        if ($targetFolder < 0) {
+            $targetFolder = 0;
+        }
+
+        $statement = $pdo->prepare('SELECT id, name, parent_id, created_by, is_personal FROM folders WHERE id = ?');
+        $statement->execute([$id]);
+        $folderRow = $statement->fetch();
+        if (!$folderRow) {
+            gc_flash('error', 'Папка не найдена.');
+            gc_redirect($returnUrl);
+        }
+
+        $sourcePersonal = gc_bool_value($folderRow['is_personal']);
+        $sourceRoot = $folderRow['parent_id'] === null;
+        $allowed = $sourcePersonal
+            ? (int) $folderRow['created_by'] === $uid
+            : ((int) $folderRow['created_by'] === $uid || gc_is_admin() || gc_has_right('edit_any_file'));
+        if (!$allowed || ($sourcePersonal && $sourceRoot)) {
+            gc_flash('error', 'Эту папку нельзя переместить.');
+            gc_redirect($returnUrl);
+        }
+
+        if ($sourcePersonal && $targetFolder <= 0) {
+            if ($personalRootId <= 0) {
+                gc_flash('error', 'Личный корень не найден.');
+                gc_redirect($returnUrl);
+            }
+            $targetFolder = (int) $personalRootId;
+        }
+
+        $targetLabel = 'в корень';
+        if ($targetFolder > 0) {
+            $statement = $pdo->prepare('SELECT id, name, parent_id, created_by, is_personal FROM folders WHERE id = ?');
+            $statement->execute([$targetFolder]);
+            $targetRow = $statement->fetch();
+            if (!$targetRow) {
+                gc_flash('error', 'Папка назначения не найдена.');
+                gc_redirect($returnUrl);
+            }
+            $targetPersonal = gc_bool_value($targetRow['is_personal']);
+            if ($targetPersonal !== $sourcePersonal) {
+                gc_flash('error', 'Нельзя перемешать личные и общие папки.');
+                gc_redirect($returnUrl);
+            }
+            if ($targetPersonal && (int) $targetRow['created_by'] !== $uid) {
+                gc_flash('error', 'В личную папку можно переместить только свою папку.');
+                gc_redirect($returnUrl);
+            }
+            if ($targetFolder === $id) {
+                gc_flash('error', 'Нельзя переместить папку внутрь себя.');
+                gc_redirect($returnUrl);
+            }
+            $statement = $pdo->prepare(
+                'WITH RECURSIVE descendants AS ('
+                . ' SELECT id FROM folders WHERE id = ?'
+                . ' UNION ALL'
+                . ' SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id'
+                . ') SELECT 1 FROM descendants WHERE id = ? LIMIT 1'
+            );
+            $statement->execute([$id, $targetFolder]);
+            if ($statement->fetchColumn()) {
+                gc_flash('error', 'Нельзя переместить папку внутрь её вложенной папки.');
+                gc_redirect($returnUrl);
+            }
+            $targetLabel = 'в «' . (string) $targetRow['name'] . '»';
+        } elseif ($sourcePersonal) {
+            gc_flash('error', 'Папка назначения не найдена.');
+            gc_redirect($returnUrl);
+        }
+
+        $currentParent = $folderRow['parent_id'] !== null ? (int) $folderRow['parent_id'] : 0;
+        if ($currentParent === $targetFolder) {
+            gc_flash('info', 'Папка уже находится в этом месте.');
+            gc_redirect($returnUrl);
+        }
+
+        $statement = $pdo->prepare('SELECT 1 FROM folders WHERE COALESCE(parent_id, 0) = ? AND lower(name) = lower(?) AND is_personal = ? AND id <> ?');
+        $statement->execute([$targetFolder, (string) $folderRow['name'], $sourcePersonal ? 'true' : 'false', $id]);
+        if ($statement->fetchColumn()) {
+            gc_flash('error', 'Папка с таким названием уже есть в этом месте.');
+            gc_redirect($returnUrl);
+        }
+
+        $pdo->prepare('UPDATE folders SET parent_id = ? WHERE id = ?')
+            ->execute([$targetFolder > 0 ? $targetFolder : null, $id]);
+        gc_flash('ok', 'Папка «' . (string) $folderRow['name'] . '» перемещена ' . $targetLabel . '.');
         gc_redirect($returnUrl);
     }
 
@@ -1310,8 +1413,8 @@ gc_head('Хранилище', 'storage');
                             $childLabel .= ' · ' . $child['creator_login'];
                         }
                         ?>
-                    <div class="gc_drive_folder" data-drop-folder="<?= $childId ?>">
-                        <a class="gc_drive_folder_open" href="<?= gc_h(gc_storage_link($childId, $sort, $dir, $scope)) ?>" draggable="false">
+                    <div class="gc_drive_folder" data-drop-folder="<?= $childId ?>" data-folder-card data-folder-id="<?= $childId ?>" draggable="<?= $canManageChild ? 'true' : 'false' ?>">
+                        <a class="gc_drive_folder_open" href="<?= gc_h(gc_storage_link($childId, $sort, $dir, $scope)) ?>" draggable="<?= $canManageChild ? 'true' : 'false' ?>">
                             <span class="gc_drive_folder_icon"><span class="gc_ico gc_ico--folder"></span></span>
                             <span class="gc_drive_folder_name"><?= gc_h($childLabel) ?></span>
                             <span class="gc_drive_folder_meta"><?= $childCount ?> <?= $fileWord($childCount) ?></span>
@@ -1357,7 +1460,7 @@ gc_head('Хранилище', 'storage');
                     <h2>Файлы</h2>
                     <span class="gc_badge"><?= count($files) ?></span>
                     <?php if ($childFolders !== []) { ?>
-                    <span class="gc_drive_hint">Перетащите файл на папку, чтобы переместить</span>
+                    <span class="gc_drive_hint">Перетащите файл или папку на папку, чтобы переместить</span>
                     <?php } ?>
                 </div>
 

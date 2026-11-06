@@ -2762,12 +2762,14 @@ input[type="file"]::file-selector-button:hover {
 }
 
 .gc_drive_tile[draggable='true'],
-.gc_filerow[draggable='true'] {
+.gc_filerow[draggable='true'],
+.gc_drive_folder[draggable='true'] {
   cursor: grab;
 }
 
 .gc_drive_tile.is-dragging,
-.gc_filerow.is-dragging {
+.gc_filerow.is-dragging,
+.gc_drive_folder.is-dragging {
   opacity: 0.4;
   cursor: grabbing;
 }
