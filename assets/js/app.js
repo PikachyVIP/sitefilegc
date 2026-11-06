@@ -760,6 +760,7 @@
         var retry = widget.querySelector('[data-upload-retry]');
         var clear = widget.querySelector('[data-upload-clear]');
         var refresh = widget.querySelector('[data-upload-refresh]');
+        var logLink = widget.querySelector('[data-upload-log]');
 
         var DB_NAME = 'gc_upload_queue';
         var STORE = 'items';
@@ -778,6 +779,99 @@
         var noticeUntil = 0;
         var hideTimer = 0;
         var commitAttempts = 0;
+        var uidScope = widget.getAttribute('data-upload-uid') || 'guest';
+        var assetVersion = widget.getAttribute('data-upload-version') || '';
+        var requestId = window.crypto && window.crypto.randomUUID
+            ? window.crypto.randomUUID().replace(/-/g, '')
+            : String(Date.now()) + Math.random().toString(16).slice(2);
+        var CLEAR_KEY = 'gc_upload_cleared_at_' + uidScope;
+        var LOG_KEY = 'gc_upload_log_' + uidScope;
+        var logEvents = [];
+        var logTimer = 0;
+
+        try {
+            var storedLog = window.sessionStorage.getItem(LOG_KEY);
+            if (storedLog) {
+                var parsedLog = JSON.parse(storedLog);
+                if (Array.isArray(parsedLog)) logEvents = parsedLog.slice(-1200);
+            }
+        } catch (error) { logEvents = []; }
+
+        function flushLog() {
+            logTimer = 0;
+            try {
+                window.sessionStorage.setItem(LOG_KEY, JSON.stringify(logEvents.slice(-1200)));
+            } catch (error) { /* sessionStorage is best-effort */ }
+        }
+
+        function logUpload(event, data) {
+            var entry = { t: new Date().toISOString(), event: event, request_id: requestId };
+            if (data && typeof data === 'object') {
+                Object.keys(data).forEach(function (key) {
+                    var value = data[key];
+                    if (value !== undefined && value !== null && value !== '') entry[key] = value;
+                });
+            }
+            logEvents.push(entry);
+            if (logEvents.length > 1200) logEvents.splice(0, logEvents.length - 1200);
+            if (logTimer) window.clearTimeout(logTimer);
+            logTimer = window.setTimeout(flushLog, 250);
+            try { console.info('[GC upload]', event, data || ''); } catch (error) { /* console is optional */ }
+        }
+
+        function clearMarker() {
+            try { return Number(window.localStorage.getItem(CLEAR_KEY)) || 0; } catch (error) { return 0; }
+        }
+
+        function setClearMarker(value) {
+            try { window.localStorage.setItem(CLEAR_KEY, String(value)); } catch (error) { /* best-effort */ }
+        }
+
+        function authStatus(status) {
+            return status === 401 || status === 403 || status === 419;
+        }
+
+        function downloadLog() {
+            flushLog();
+            var payload = {
+                generated_at: new Date().toISOString(),
+                version: assetVersion,
+                user_id: uidScope,
+                page: window.location.href,
+                user_agent: window.navigator.userAgent,
+                queue: queue.map(function (item) {
+                    return {
+                        id: item.id,
+                        name: item.name,
+                        size: item.size,
+                        offset: item.offset || 0,
+                        attempts: item.attempts || 0,
+                        state: item.state,
+                        error: item.error || ''
+                    };
+                }),
+                events: logEvents
+            };
+            var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = 'gc-upload-log-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        }
+
+        window.addEventListener('pagehide', flushLog);
+        if (logLink) {
+            logLink.hidden = false;
+            logLink.addEventListener('click', function (event) {
+                event.preventDefault();
+                downloadLog();
+            });
+        }
+        logUpload('init', { version: assetVersion, user_id: uidScope });
 
         function uid() {
             if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID().replace(/-/g, '');
@@ -1024,6 +1118,13 @@
             item.state = 'error';
             var index = queue.indexOf(item);
             if (index >= 0) queue.splice(index, 1);
+            logUpload('item_drop', {
+                id: item.id,
+                name: item.name,
+                attempts: item.attempts || 0,
+                error: item.error || '',
+                message: message || ''
+            });
             dbDelete(item.id);
             deleteRemote(item);
             active = null;
@@ -1048,6 +1149,9 @@
                 return;
             }
             clearing = true;
+            var clearedAt = Date.now();
+            setClearMarker(clearedAt);
+            logUpload('clear_start', { files: queue.length, message: message || '' });
             if (hideTimer) {
                 window.clearTimeout(hideTimer);
                 hideTimer = 0;
@@ -1064,8 +1168,11 @@
                 try { currentXhr.abort(); } catch (error) { /* already finished */ }
                 currentXhr = null;
             }
-            dbEmpty();
+            // The marker above is synchronous, so even an immediate reload
+            // cannot restore these rows while IndexedDB is still clearing.
+            var cleanup = dbEmpty();
             items.forEach(function (item) {
+                dbDelete(item.id);
                 deleteRemote(item);
                 window.setTimeout(function () { deleteRemote(item); }, 700);
             });
@@ -1079,10 +1186,15 @@
                 widget.hidden = true;
                 render();
             }
-            window.setTimeout(function () { clearing = false; }, 0);
+            cleanup.then(function () {
+                clearing = false;
+                logUpload('clear_done', { files: items.length, marker: clearedAt });
+                flushLog();
+            });
         }
 
         function scheduleAutoRetry(item) {
+            logUpload('retry_scheduled', { id: item.id, name: item.name, attempt: item.attempts || 0 });
             window.setTimeout(function () {
                 if (clearing || item.state !== 'error' || queue.indexOf(item) < 0) return;
                 if ((item.attempts || 0) >= MAX_ATTEMPTS) return;
@@ -1097,10 +1209,27 @@
             }, 3000);
         }
 
-        function failItem(item, message) {
+        function failItem(item, message, status) {
             if (clearing || !queue.length) return;
             item.state = 'error';
             item.error = message || 'Не удалось загрузить файл.';
+            logUpload('item_fail', {
+                id: item.id,
+                name: item.name,
+                status: status || 0,
+                attempt: item.attempts || 0,
+                offset: item.offset || 0,
+                message: item.error
+            });
+            if (authStatus(status)) {
+                item.error += ' Сессия истекла: обновите страницу, очередь сохранится.';
+                save(item);
+                active = null;
+                setState('error');
+                render();
+                if (noteEl) noteEl.textContent = item.error;
+                return;
+            }
             if ((item.attempts || 0) >= MAX_ATTEMPTS) {
                 dropItem(item, 'Файл «' + item.name + '» не загрузился после ' + MAX_ATTEMPTS + ' попыток и удалён из очереди.');
                 return;
@@ -1118,16 +1247,31 @@
             return fetch('upload_chunk.php?id=' + encodeURIComponent(item.id), {
                 method: 'GET',
                 credentials: 'same-origin',
-                headers: { 'X-GC-CSRF': csrf() }
+                headers: { 'X-GC-CSRF': csrf(), 'X-GC-Request-ID': requestId }
             }).then(function (response) {
-                if (response.status === 404) return null;
-                return response.json().catch(function () { return null; });
+                return response.json().catch(function () { return null; }).then(function (payload) {
+                    logUpload('status_response', {
+                        id: item.id,
+                        name: item.name,
+                        status: response.status,
+                        offset: payload && typeof payload.offset === 'number' ? payload.offset : null,
+                        done: !!(payload && payload.done)
+                    });
+                    if (response.status === 404) return null;
+                    if (!response.ok) {
+                        var error = new Error(payload && payload.error ? payload.error : 'Сервер не отдал состояние загрузки (HTTP ' + response.status + ').');
+                        error.status = response.status;
+                        throw error;
+                    }
+                    return payload;
+                });
             });
         }
 
         function sendChunk(item, blob) {
             return new Promise(function (resolve, reject) {
                 var xhr = new XMLHttpRequest();
+                var startedAt = Date.now();
                 currentXhr = xhr;
                 var finish = function () {
                     if (currentXhr === xhr) currentXhr = null;
@@ -1135,6 +1279,7 @@
                 xhr.open('POST', 'upload_chunk.php?id=' + encodeURIComponent(item.id), true);
                 xhr.setRequestHeader('Content-Type', 'application/octet-stream');
                 xhr.setRequestHeader('X-GC-CSRF', csrf());
+                xhr.setRequestHeader('X-GC-Request-ID', requestId);
                 xhr.setRequestHeader('X-GC-OFFSET', String(item.offset));
                 xhr.setRequestHeader('X-GC-TOTAL', String(item.size));
                 xhr.setRequestHeader('X-GC-META', blobToBase64(JSON.stringify({
@@ -1142,6 +1287,14 @@
                     path: item.path,
                     size: item.size
                 })));
+                logUpload('chunk_send', {
+                    id: item.id,
+                    name: item.name,
+                    attempt: item.attempts || 0,
+                    offset: item.offset || 0,
+                    bytes: blob.size,
+                    total: item.size
+                });
 
                 xhr.upload.addEventListener('progress', function (event) {
                     if (!event.lengthComputable) return;
@@ -1163,6 +1316,15 @@
                 xhr.addEventListener('load', function () {
                     finish();
                     var payload = parseJson(xhr.responseText);
+                    logUpload('chunk_response', {
+                        id: item.id,
+                        name: item.name,
+                        status: xhr.status,
+                        duration_ms: Date.now() - startedAt,
+                        offset: payload && typeof payload.offset === 'number' ? payload.offset : null,
+                        done: !!(payload && payload.done),
+                        error: payload && payload.error ? payload.error : ''
+                    });
                     if (xhr.status === 409 && payload && typeof payload.offset === 'number') {
                         resolve({ conflict: true, offset: payload.offset });
                         return;
@@ -1171,14 +1333,18 @@
                         resolve(payload);
                         return;
                     }
-                    reject(new Error(payload && payload.error ? payload.error : 'Сервер отклонил часть файла (HTTP ' + xhr.status + ').'));
+                    var error = new Error(payload && payload.error ? payload.error : 'Сервер отклонил часть файла (HTTP ' + xhr.status + ').');
+                    error.status = xhr.status;
+                    reject(error);
                 });
                 xhr.addEventListener('error', function () {
                     finish();
+                    logUpload('chunk_network_error', { id: item.id, name: item.name, duration_ms: Date.now() - startedAt });
                     reject(new Error('Сеть недоступна. Загрузка продолжится после повтора.'));
                 });
                 xhr.addEventListener('abort', function () {
                     finish();
+                    logUpload('chunk_abort', { id: item.id, name: item.name, duration_ms: Date.now() - startedAt });
                     reject(new Error('Загрузка отменена.'));
                 });
                 xhr.send(blob);
@@ -1193,10 +1359,17 @@
             notice = '';
             noticeUntil = 0;
             active = item;
+            logUpload('item_start', {
+                id: item.id,
+                name: item.name,
+                size: item.size,
+                attempt: item.attempts,
+                offset: item.offset || 0
+            });
             setState('uploading');
             render();
             return save(item).then(function () {
-                return getStatus(item).catch(function () { return null; });
+                return getStatus(item);
             }).then(function (status) {
                 if (clearing || queue.indexOf(item) < 0) {
                     throw new Error('Загрузка отменена.');
@@ -1212,7 +1385,15 @@
                 }
                 return pump(item);
             }).catch(function (error) {
-                failItem(item, error && error.message ? error.message : 'Не удалось загрузить файл.');
+                var message = error && error.message ? error.message : 'Не удалось загрузить файл.';
+                logUpload('item_error', {
+                    id: item.id,
+                    name: item.name,
+                    status: error && error.status ? error.status : 0,
+                    attempt: item.attempts || 0,
+                    message: message
+                });
+                failItem(item, message, error && error.status ? error.status : 0);
             });
         }
 
@@ -1268,21 +1449,27 @@
             var data = new FormData(form);
             staged.forEach(function (item) { data.append('staged_upload[]', item.stagedId); });
             data.append('ajax', '1');
+            logUpload('commit_start', { files: staged.length, bytes: staged.reduce(function (sum, item) { return sum + (item.size || 0); }, 0) });
 
             fetch(form.getAttribute('action') || window.location.href, {
                 method: 'POST',
                 body: data,
                 credentials: 'same-origin',
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-GC-Request-ID': requestId }
             }).then(function (response) {
-                return response.json().catch(function () { return null; });
+                return response.json().catch(function () { return null; }).then(function (payload) {
+                    if (!response.ok || !payload || !payload.ok) {
+                        var error = new Error(payload && payload.errors && payload.errors.length
+                            ? payload.errors[0]
+                            : 'Не удалось сохранить файлы в хранилище (HTTP ' + response.status + ').');
+                        error.status = response.status;
+                        throw error;
+                    }
+                    return payload;
+                });
             }).then(function (payload) {
-                if (!payload || !payload.ok) {
-                    throw new Error(payload && payload.errors && payload.errors.length
-                        ? payload.errors[0]
-                        : 'Не удалось сохранить файлы в хранилище.');
-                }
                 return Promise.all(queue.map(function (item) { return dbDelete(item.id); })).then(function () {
+                    logUpload('commit_ok', { files: staged.length, uploaded: payload.uploaded || 0 });
                     queue = [];
                     commitAttempts = 0;
                     setState('done');
@@ -1293,6 +1480,18 @@
                 });
             }).catch(function (error) {
                 committing = false;
+                logUpload('commit_error', {
+                    status: error && error.status ? error.status : 0,
+                    message: error && error.message ? error.message : '',
+                    attempt: commitAttempts + 1
+                });
+                if (authStatus(error && error.status)) {
+                    setState('error');
+                    if (retry) retry.hidden = false;
+                    render();
+                    if (noteEl) noteEl.textContent = 'Сессия истекла: файлы остались в очереди. Обновите страницу и повторите.';
+                    return;
+                }
                 commitAttempts++;
                 if (commitAttempts >= MAX_ATTEMPTS) {
                     clearTransfer('Файлы не сохранились после ' + MAX_ATTEMPTS + ' попыток. Очередь очищена.');
@@ -1375,6 +1574,11 @@
             });
             if (!added) return;
             queue.slice(-added).forEach(function (item) { save(item); });
+            logUpload('queue_add', {
+                added: added,
+                queued: queue.length,
+                bytes: queue.reduce(function (sum, item) { return sum + (item.size || 0); }, 0)
+            });
             widget.hidden = false;
             setState('uploading');
             render();
@@ -1457,18 +1661,29 @@
             dbFailed = true;
             return [];
         }).then(function (items) {
+            var clearedAt = clearMarker();
+            var dropped = [];
             queue = (items || []).filter(function (item) {
-                return item && item.file && item.id;
+                if (!item || !item.file || !item.id) return false;
+                if (clearedAt > 0 && (Number(item.createdAt) || 0) < clearedAt) {
+                    dropped.push(item);
+                    return false;
+                }
+                return true;
             }).map(function (item) {
                 if (item.state === 'uploading') item.state = 'queued';
                 item.attempts = Math.max(0, Math.min(MAX_ATTEMPTS - 1, Number(item.attempts) || 0));
                 return item;
             });
+            dropped.forEach(function (item) { dbDelete(item.id); });
+            logUpload('restore', { found: (items || []).length, kept: queue.length, dropped: dropped.length, clear_marker: clearedAt });
             if (!queue.length) return;
             widget.hidden = false;
             setState('uploading');
             render();
             runQueue();
+        }).catch(function (error) {
+            logUpload('restore_error', { message: error && error.message ? error.message : String(error) });
         });
     }
 

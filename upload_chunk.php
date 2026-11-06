@@ -16,8 +16,39 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 
+$earlyId = $_GET['id'] ?? ($_SERVER['HTTP_X_GC_UPLOAD_ID'] ?? '');
+$GLOBALS['gc_chunk_id'] = is_string($earlyId) && preg_match('/^[a-f0-9]{32}$/', $earlyId) ? $earlyId : null;
+$GLOBALS['gc_chunk_started'] = microtime(true);
+$GLOBALS['gc_chunk_log'] = false;
+
+register_shutdown_function(static function (): void {
+    if (empty($GLOBALS['gc_chunk_log'])) {
+        return;
+    }
+    $error = error_get_last();
+    if (!is_array($error) || !in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        return;
+    }
+    gc_upload_log('chunk_fatal', [
+        'id' => $GLOBALS['gc_chunk_id'] ?? null,
+        'message' => substr((string) ($error['message'] ?? ''), 0, 500),
+    ]);
+});
+
 function gc_chunk_json(array $payload, int $status = 200): void
 {
+    if (!empty($GLOBALS['gc_chunk_log'])) {
+        gc_upload_log('chunk_response', [
+            'id' => $GLOBALS['gc_chunk_id'] ?? null,
+            'status' => $status,
+            'ok' => isset($payload['ok']) ? (bool) $payload['ok'] : null,
+            'error' => isset($payload['error']) ? (string) $payload['error'] : '',
+            'offset' => isset($payload['offset']) ? (int) $payload['offset'] : null,
+            'done' => isset($payload['done']) ? (bool) $payload['done'] : null,
+            'deleted' => isset($payload['deleted']) ? (bool) $payload['deleted'] : null,
+            'duration_ms' => isset($GLOBALS['gc_chunk_started']) ? (int) round((microtime(true) - $GLOBALS['gc_chunk_started']) * 1000) : null,
+        ]);
+    }
     http_response_code($status);
     echo json_encode($payload, JSON_UNESCAPED_UNICODE);
     exit;
@@ -40,10 +71,21 @@ if (!in_array($method, ['GET', 'POST', 'DELETE'], true)) {
     gc_chunk_json(['ok' => false, 'error' => 'Метод не поддерживается.'], 405);
 }
 
+// Only authenticated, CSRF-checked requests write server logs. Logging every
+// rejected probe would let an anonymous client fill the disk.
+$GLOBALS['gc_chunk_log'] = true;
+gc_upload_log('chunk_begin', [
+    'id' => $GLOBALS['gc_chunk_id'],
+    'content_length' => isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0,
+    'offset' => isset($_SERVER['HTTP_X_GC_OFFSET']) ? (int) $_SERVER['HTTP_X_GC_OFFSET'] : null,
+    'total' => isset($_SERVER['HTTP_X_GC_TOTAL']) ? (int) $_SERVER['HTTP_X_GC_TOTAL'] : null,
+]);
+
 $uploadId = $_GET['id'] ?? ($_SERVER['HTTP_X_GC_UPLOAD_ID'] ?? '');
 if (!is_string($uploadId) || !preg_match('/^[a-f0-9]{32}$/', $uploadId)) {
     gc_chunk_json(['ok' => false, 'error' => 'Некорректный идентификатор загрузки.'], 400);
 }
+$GLOBALS['gc_chunk_id'] = $uploadId;
 
 $partsDir = __DIR__ . '/uploads/.parts';
 $stageDir = __DIR__ . '/uploads/.staging';
@@ -162,6 +204,12 @@ try {
         $relPath = implode('/', array_merge($parts, [$name]));
 
         $total = isset($incoming['size']) ? (int) $incoming['size'] : $total;
+        gc_upload_log('chunk_meta', [
+            'id' => $uploadId,
+            'name' => $name,
+            'path' => $relPath,
+            'size' => $total,
+        ]);
         $max = gc_max_upload();
         if ($total <= 0) {
             gc_chunk_json(['ok' => false, 'error' => 'Пустой файл загрузить нельзя.'], 400);

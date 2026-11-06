@@ -11,7 +11,7 @@ require_once __DIR__ . '/session.php';
 
 const GC_APP_NAME = 'GC Files';
 const GC_APP_VERSION = '2.2.0';
-const GC_ASSET_VERSION = '2.2.21';
+const GC_ASSET_VERSION = '2.2.22';
 
 // Hard ceiling for every uploaded file, independent of php.ini. 20 GiB.
 const GC_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
@@ -36,6 +36,7 @@ const GC_RIGHTS = [
     'delete_any_file' => 'Удаление любых файлов',
     'pin_files' => 'Закрепление файлов',
     'manage_updates' => 'Обновления приложений',
+    'view_logs' => 'Журнал загрузок',
 ];
 
 if (!empty($db_config['timezone'])) {
@@ -329,6 +330,62 @@ function gc_csrf_check(): void
         }
         exit;
     }
+}
+
+/**
+ * One id per HTTP request, written next to every upload log line so a chunk,
+ * its response and a later commit can be matched without guessing from time.
+ */
+function gc_request_id(): string
+{
+    static $id = null;
+    if ($id === null) {
+        $headerId = trim((string) ($_SERVER['HTTP_X_GC_REQUEST_ID'] ?? ''));
+        $id = preg_match('/^[a-zA-Z0-9._-]{8,64}$/', $headerId)
+            ? $headerId
+            : bin2hex(random_bytes(6));
+    }
+
+    return $id;
+}
+
+/**
+ * Append one JSON line to uploads/.logs/upload-YYYY-MM-DD.log.
+ *
+ * Logging must never break an upload: a missing directory, a full disk or a
+ * bad value is ignored. File names are stored as metadata, never file content.
+ */
+function gc_upload_log(string $event, array $data = []): void
+{
+    static $dir = null;
+    if ($dir === null) {
+        $dir = __DIR__ . '/uploads/.logs';
+        if (!gc_ensure_data_dir($dir)) {
+            $dir = '';
+        }
+    }
+    if ($dir === '') {
+        return;
+    }
+
+    $record = [
+        'ts' => gmdate('Y-m-d\TH:i:s\Z'),
+        'event' => $event,
+        'request_id' => gc_request_id(),
+        'uid' => isset($_SESSION['user_id']) ? (int) $_SESSION['user_id'] : null,
+        'ip' => gc_client_ip(),
+        'method' => (string) ($_SERVER['REQUEST_METHOD'] ?? ''),
+        'uri' => substr((string) ($_SERVER['REQUEST_URI'] ?? ''), 0, 300),
+        'ua' => substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 220),
+        'context' => $data,
+    ];
+
+    $json = json_encode($record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json) || $json === '') {
+        return;
+    }
+
+    @file_put_contents($dir . '/upload-' . gmdate('Y-m-d') . '.log', $json . "\n", FILE_APPEND | LOCK_EX);
 }
 
 function gc_flash(string $type, string $message): void

@@ -161,6 +161,9 @@ function gc_admin_nav(string $active = ''): void
     if (gc_has_right('manage_updates')) {
         $tabs[] = ['admin_releases.php', 'releases', 'Приложения'];
     }
+    if (gc_has_right('view_logs')) {
+        $tabs[] = ['upload_logs.php', 'logs', 'Журнал загрузок'];
+    }
     ?>
 <nav class="gc_admin_nav" aria-label="Разделы админ-меню">
     <?php foreach ($tabs as [$href, $key, $label]) { ?>
@@ -193,7 +196,7 @@ function gc_foot(array $options = []): void
     }
     ?>
 <?php if (gc_user() !== null) { ?>
-<div class="gc_upload_widget" id="gcUploadWidget" data-upload-widget hidden>
+<div class="gc_upload_widget" id="gcUploadWidget" data-upload-widget data-upload-uid="<?= (int) (gc_user()['id'] ?? 0) ?>" data-upload-version="<?= gc_h(GC_ASSET_VERSION) ?>" hidden>
     <button type="button" class="gc_upload_widget_toggle" data-upload-toggle aria-expanded="false" aria-label="Очередь загрузки">
         <span class="loader" aria-hidden="true"></span>
         <span class="gc_upload_widget_badge" data-upload-badge hidden>0</span>
@@ -226,6 +229,7 @@ function gc_foot(array $options = []): void
             <button type="button" class="gc_btn gc_btn--outline gc_btn--sm" data-upload-clear hidden>Очистить</button>
             <a class="gc_btn gc_btn--primary gc_btn--sm" data-upload-refresh hidden href="#">Обновить</a>
         </div>
+        <a class="gc_upload_widget_log" data-upload-log href="#" hidden>Скачать журнал загрузки</a>
     </section>
 </div>
 <?php } ?>

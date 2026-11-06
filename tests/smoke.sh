@@ -46,4 +46,8 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' "$base/storage.php")"
 api="$(curl -fsS "$base/update_api.php")"
 printf '%s' "$api" | grep -q '"ok":true' || fail "update_api.php did not return ok"
 
+# 7. The admin upload-log page is reachable for a user with view_logs.
+status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" "$base/upload_logs.php")"
+[ "$status" = "200" ] || fail "upload_logs.php returned HTTP $status"
+
 echo "smoke: ok"

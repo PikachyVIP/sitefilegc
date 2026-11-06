@@ -53,6 +53,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode($payload, JSON_UNESCAPED_UNICODE);
             exit;
         };
+        $GLOBALS['gc_commit_started'] = microtime(true);
+        gc_upload_log('commit_begin', [
+            'scope' => $returnScope,
+            'folder' => $returnFolder,
+            'ajax' => $isAjax,
+            'content_length' => isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0,
+        ]);
+        register_shutdown_function(static function (): void {
+            $error = error_get_last();
+            if (!is_array($error) || !in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+                return;
+            }
+            gc_upload_log('commit_fatal', ['message' => substr((string) ($error['message'] ?? ''), 0, 500)]);
+        });
 
         $targetFolder = $returnFolder;
         if ($returnScope === 'personal' && $targetFolder <= 0) {
@@ -109,6 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $queue = array_values(array_filter($queue, static fn (array $item): bool => $item['error'] !== UPLOAD_ERR_NO_FILE));
 
         $failUpload = static function (string $message, int $status = 400) use ($respondJson, $returnUrl): void {
+            gc_upload_log('commit_fail', ['status' => $status, 'message' => $message]);
             $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => [$message]], $status);
             gc_flash('error', $message);
             gc_redirect($returnUrl);
@@ -160,6 +175,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             gc_flash('error', 'Файл не выбран.');
             gc_redirect($returnUrl);
         }
+        gc_upload_log('commit_queue', [
+            'staged' => count($stagedIds),
+            'files' => count($queue),
+            'bytes' => array_sum(array_map(static fn (array $item): int => (int) $item['size'], $queue)),
+            'target_folder' => $targetFolder,
+            'personal' => $returnScope === 'personal',
+        ]);
 
         if (!gc_ensure_data_dir($uploadDir)) {
             $respondJson(['ok' => false, 'uploaded' => 0, 'errors' => ['Папка uploads недоступна для записи.']], 500);
@@ -255,16 +277,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($queue as $item) {
             $isStaged = !empty($item['staged']);
             $label = $item['path'] !== '' ? $item['path'] : ($item['name'] !== '' ? $item['name'] : 'файл');
+            $itemStarted = microtime(true);
+            gc_upload_log('commit_item_begin', [
+                'name' => $label,
+                'size' => (int) $item['size'],
+                'staged' => $isStaged,
+            ]);
             if ($item['error'] !== UPLOAD_ERR_OK) {
                 $errors[] = $label . ': ' . gc_upload_error($item['error']);
+                gc_upload_log('commit_item_fail', ['name' => $label, 'reason' => 'php_upload_error', 'code' => (int) $item['error']]);
                 continue;
             }
             if ($max > 0 && $item['size'] > $max) {
                 $errors[] = $label . ': больше допустимого размера ' . gc_size($max) . '.';
+                gc_upload_log('commit_item_fail', ['name' => $label, 'reason' => 'too_large', 'size' => (int) $item['size']]);
                 continue;
             }
             if (!$isStaged && !is_uploaded_file($item['tmp_name'])) {
                 $errors[] = $label . ': загрузка не подтверждена сервером.';
+                gc_upload_log('commit_item_fail', ['name' => $label, 'reason' => 'not_uploaded_file']);
                 continue;
             }
 
@@ -280,6 +311,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : move_uploaded_file($item['tmp_name'], $path);
             if (!$placed) {
                 $errors[] = $label . ': не удалось сохранить на сервере.';
+                gc_upload_log('commit_item_fail', ['name' => $label, 'reason' => 'move_failed', 'stored' => $stored]);
                 continue;
             }
 
@@ -312,6 +344,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $pdo->commit();
                 $uploaded++;
+                gc_upload_log('commit_item_ok', [
+                    'name' => $label,
+                    'file_id' => $fileId,
+                    'folder_id' => $fileFolder,
+                    'size' => (int) $item['size'],
+                    'duration_ms' => (int) round((microtime(true) - $itemStarted) * 1000),
+                ]);
                 if ($isStaged && !empty($item['meta_path'])) {
                     @unlink((string) $item['meta_path']);
                 }
@@ -324,12 +363,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     @unlink((string) $item['meta_path']);
                 }
                 $errors[] = $label . ': не удалось сохранить в базе.';
+                gc_upload_log('commit_item_fail', [
+                    'name' => $label,
+                    'reason' => 'database',
+                    'class' => get_class($exception),
+                    'message' => substr($exception->getMessage(), 0, 400),
+                ]);
             }
         }
 
         $message = $uploaded > 0
             ? 'Загружено файлов: ' . $uploaded . ($errors !== [] ? ', с ошибками: ' . count($errors) : '') . '.'
             : 'Ни один файл не загружен.';
+        gc_upload_log('commit_done', [
+            'uploaded' => $uploaded,
+            'errors' => count($errors),
+            'messages' => array_slice($errors, 0, 10),
+            'duration_ms' => isset($GLOBALS['gc_commit_started']) ? (int) round((microtime(true) - $GLOBALS['gc_commit_started']) * 1000) : null,
+        ]);
         $respondJson([
             'ok' => $uploaded > 0,
             'uploaded' => $uploaded,
