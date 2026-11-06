@@ -24,6 +24,19 @@ if ($scope === 'mine') {
 $adminPersonal = $isSuperadmin && $scope === 'personal';
 $personalRootId = gc_personal_folder_id($pdo, $uid);
 
+$diskFree = @disk_free_space($uploadDir);
+$diskTotal = @disk_total_space($uploadDir);
+$diskFreeBytes = null;
+$diskTotalBytes = null;
+$diskUsedPercent = null;
+$diskFreePercent = null;
+if (is_float($diskFree) && is_float($diskTotal) && $diskTotal > 0) {
+    $diskFreeBytes = max(0, (int) $diskFree);
+    $diskTotalBytes = (int) $diskTotal;
+    $diskFreePercent = max(0.0, min(100.0, ($diskFreeBytes / $diskTotalBytes) * 100));
+    $diskUsedPercent = 100 - $diskFreePercent;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     gc_csrf_check();
     $action = isset($_POST['action']) && is_string($_POST['action']) ? $_POST['action'] : '';
@@ -1190,10 +1203,37 @@ gc_head('Хранилище', 'storage');
             <h1 class="gc_h1 gc_drive_title">Хранилище</h1>
             <p class="gc_drive_lead">Все общие файлы и личные файлы. Личные видит только тот, кто их загрузил<?= $adminPersonal ? ', и суперпользователь' : '' ?>.</p>
         </div>
-        <div class="gc_drive_stats">
-            <div class="gc_hero_stat"><b><?= $totalVisible ?></b><span>файлов в этом виде</span></div>
-            <div class="gc_hero_stat"><b><?= count($folderMap) ?></b><span>папок</span></div>
-            <div class="gc_hero_stat"><b><?= count($roleTags) ?></b><span>ролей</span></div>
+        <div class="gc_drive_aside">
+            <?php if ($diskFreeBytes !== null && $diskTotalBytes !== null && $diskUsedPercent !== null && $diskFreePercent !== null) {
+                $diskRadius = 27;
+                $diskCircumference = 2 * M_PI * $diskRadius;
+                $diskOffset = $diskCircumference * (1 - ($diskUsedPercent / 100));
+            ?>
+            <div class="gc_disk<?= $diskFreePercent < 10 ? ' is-low' : '' ?>" role="status" aria-label="Свободно на диске <?= gc_h(gc_size($diskFreeBytes)) ?> из <?= gc_h(gc_size($diskTotalBytes)) ?>">
+                <div class="gc_disk_ring">
+                    <svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+                        <circle class="gc_disk_track" cx="32" cy="32" r="<?= $diskRadius ?>"></circle>
+                        <circle class="gc_disk_fill" cx="32" cy="32" r="<?= $diskRadius ?>"
+                            stroke-dasharray="<?= gc_h((string) $diskCircumference) ?>"
+                            stroke-dashoffset="<?= gc_h((string) $diskOffset) ?>"></circle>
+                    </svg>
+                    <div class="gc_disk_center">
+                        <b><?= gc_h(gc_size($diskFreeBytes)) ?></b>
+                        <span>свободно</span>
+                    </div>
+                </div>
+                <div class="gc_disk_meta">
+                    <strong>Диск</strong>
+                    <span>занято <?= gc_h((string) round($diskUsedPercent)) ?>%</span>
+                    <small>из <?= gc_h(gc_size($diskTotalBytes)) ?></small>
+                </div>
+            </div>
+            <?php } ?>
+            <div class="gc_drive_stats">
+                <div class="gc_hero_stat"><b><?= $totalVisible ?></b><span>файлов в этом виде</span></div>
+                <div class="gc_hero_stat"><b><?= count($folderMap) ?></b><span>папок</span></div>
+                <div class="gc_hero_stat"><b><?= count($roleTags) ?></b><span>ролей</span></div>
+            </div>
         </div>
     </section>
 

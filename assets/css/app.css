@@ -2422,9 +2422,50 @@ input[type="file"]::file-selector-button:hover {
     font-size: 13px;
     line-height: 1.55;
 }
+.gc_drive_aside { display: flex; flex-direction: row-reverse; align-items: flex-end; gap: 24px; flex: none; }
 .gc_drive_stats { display: flex; gap: 26px; flex: none; }
 .gc_drive_stats .gc_hero_stat { text-align: right; }
 .gc_drive_stats .gc_hero_stat b { font-size: 24px; }
+
+.gc_disk {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    padding: 9px 14px 9px 9px;
+    border: 1px solid var(--gc_border-1);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, .018);
+}
+.gc_disk_ring { position: relative; width: 88px; height: 88px; flex: none; }
+.gc_disk_ring svg { display: block; width: 100%; height: 100%; transform: rotate(-90deg); }
+.gc_disk_track,
+.gc_disk_fill { fill: none; stroke-width: 6; }
+.gc_disk_track { stroke: rgba(226, 216, 250, .11); }
+.gc_disk_fill {
+    stroke: var(--gc_accent);
+    stroke-linecap: round;
+    transition: stroke-dashoffset .45s ease, stroke .2s ease;
+}
+.gc_disk.is-low .gc_disk_fill { stroke: #e06a6a; }
+.gc_disk_center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    text-align: center;
+    line-height: 1.1;
+    pointer-events: none;
+}
+.gc_disk_center b { font-size: 13px; font-weight: 650; white-space: nowrap; }
+.gc_disk_center span { color: var(--gc_text-muted); font-size: 8.5px; }
+.gc_disk_meta { display: flex; flex-direction: column; gap: 3px; min-width: 84px; }
+.gc_disk_meta strong { font-size: 12px; font-weight: 600; }
+.gc_disk_meta span { color: var(--gc_text-dim); font-size: 10.5px; }
+.gc_disk_meta small { color: var(--gc_text-muted); font-size: 10px; }
 
 .gc_storage.gc_storage--drive { grid-template-columns: 360px minmax(0, 1fr); gap: 18px; }
 .gc_drive_sidebar {
@@ -2730,6 +2771,7 @@ input[type="file"]::file-selector-button:hover {
 }
 @media (max-width: 900px) {
     .gc_drive_head { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .gc_drive_aside { width: 100%; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 18px; }
     .gc_drive_stats { gap: 18px; }
     .gc_drive_stats .gc_hero_stat { text-align: left; }
     .gc_storage.gc_storage--drive { grid-template-columns: 1fr; }
