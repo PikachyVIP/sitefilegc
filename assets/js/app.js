@@ -1381,12 +1381,40 @@
 
     /* ---------- boot ---------- */
 
+    function initTreeScroll() {
+        var scroller = document.querySelector('.gc_tree_scroll');
+        var nav = document.querySelector('.gc_tree_nav');
+        if (!scroller || !nav) return;
+        var buttons = nav.querySelectorAll('[data-tree-nav]');
+
+        function sync() {
+            var overflow = scroller.scrollWidth > scroller.clientWidth + 1;
+            nav.hidden = !overflow;
+            if (!overflow) return;
+            var max = scroller.scrollWidth - scroller.clientWidth;
+            buttons[0].disabled = scroller.scrollLeft <= 1;
+            buttons[1].disabled = scroller.scrollLeft >= max - 1;
+        }
+
+        buttons.forEach(function (button) {
+            button.addEventListener('click', function () {
+                var direction = Number(button.getAttribute('data-tree-nav')) || 1;
+                scroller.scrollBy({ left: direction * 160, behavior: 'smooth' });
+            });
+        });
+        scroller.addEventListener('scroll', sync, { passive: true });
+        scroller.addEventListener('click', function () { setTimeout(sync, 0); });
+        window.addEventListener('resize', sync);
+        sync();
+    }
+
     function boot() {
         initCurtain();
         initCopy();
         initPasswordToggle();
         initDrops();
         initTree();
+        initTreeScroll();
         initFilters();
         initFileSearch();
         initConfirm();
