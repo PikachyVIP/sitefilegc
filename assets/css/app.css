@@ -1291,9 +1291,18 @@
     color: var(--gc_text-muted);
 }
 
-.gc_tree { list-style: none; }
+.gc_tree_scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+}
+.gc_tree { list-style: none; width: max-content; min-width: 100%; }
 .gc_tree ul {
     list-style: none;
+    width: max-content;
+    min-width: 100%;
     margin-left: 0;
     padding-left: 0;
 }
@@ -1304,6 +1313,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
+    min-width: max-content;
     padding: 6px 7px;
     border-radius: 7px;
     color: var(--gc_text-dim);
@@ -1352,6 +1362,7 @@
 .gc_tree_link .gc_ico { width: 15px; height: 15px; color: var(--gc_accent); opacity: 0.7; }
 .gc_tree_row.is-active .gc_tree_link .gc_ico { opacity: 1; }
 .gc_tree_name {
+    max-width: 170px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

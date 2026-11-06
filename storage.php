@@ -944,7 +944,20 @@ $canManageCurrent = !$adminPersonal && $folderId > 0
     && !$isPersonalRootRow($folderMap[$folderId] ?? [])
     && ((int) ($folderMap[$folderId]['created_by'] ?? 0) === $uid || gc_is_admin() || $canEditAny);
 
-$renderTree = function (int $parent, int $depth = 0) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope, $adminPersonal): void {
+$rootFolderId = $adminPersonal ? 0 : ($scope === 'personal' ? $personalRootId : 0);
+$treeMaxDepth = 0;
+$measureTreeDepth = function (int $parent, int $depth) use (&$measureTreeDepth, &$treeMaxDepth, $children): void {
+    foreach ($children[$parent] ?? [] as $id) {
+        $treeMaxDepth = max($treeMaxDepth, $depth);
+        $measureTreeDepth($id, $depth + 1);
+    }
+};
+$measureTreeDepth($rootFolderId, 1);
+// Keep the real nesting visible: the step shrinks for very deep trees instead
+// of flattening everything after the fifth level.
+$treeIndent = $treeMaxDepth > 0 ? max(3, min(10, intdiv(135, $treeMaxDepth))) : 10;
+
+$renderTree = function (int $parent, int $depth = 0) use (&$renderTree, $children, $folderMap, $folderCounts, $folderId, $sort, $dir, $scope, $adminPersonal, $treeIndent): void {
     if (empty($children[$parent])) {
         return;
     }
@@ -959,7 +972,7 @@ $renderTree = function (int $parent, int $depth = 0) use (&$renderTree, $childre
             $treeLabel .= ' · ' . $node['creator_login'];
         }
         echo '<li class="gc_tree_item">';
-        $rowStyle = $depth > 0 ? ' style="padding-left:' . (7 + min($depth, 5) * 11) . 'px"' : '';
+        $rowStyle = $depth > 0 ? ' style="padding-left:' . (7 + $depth * $treeIndent) . 'px"' : '';
         echo '<div class="gc_tree_row' . ($active ? ' is-active' : '') . '"' . $rowStyle . '>';
         echo '<button type="button" class="gc_tree_toggle' . ($hasChildren ? '' : ' is-empty') . '"'
             . ' aria-expanded="true"' . ($hasChildren ? ' aria-controls="tree-' . $id . '"' : '') . '>'
@@ -1015,7 +1028,6 @@ $scopeLinks = [
     'all' => gc_storage_link(0, $sort, $dir, 'all'),
     'personal' => gc_storage_link($adminPersonal ? 0 : $personalRootId, $sort, $dir, 'personal'),
 ];
-$rootFolderId = $adminPersonal ? 0 : ($scope === 'personal' ? $personalRootId : 0);
 $rootFolderLabel = $adminPersonal ? 'Все личные' : ($scope === 'personal' ? 'Личные файлы' : 'Корень');
 $roleTags = isset($user['tags']) && is_array($user['tags']) ? array_values($user['tags']) : [];
 $rightLabels = [];
@@ -1061,6 +1073,7 @@ gc_head('Хранилище', 'storage');
             </nav>
 
             <div class="gc_drive_side_title">Папки</div>
+            <div class="gc_tree_scroll">
             <ul class="gc_tree">
                 <li class="gc_tree_item gc_tree_root">
                     <div class="gc_tree_row<?= $folderId === $rootFolderId ? ' is-active' : '' ?>">
@@ -1073,6 +1086,7 @@ gc_head('Хранилище', 'storage');
                     <?php $renderTree($rootFolderId); ?>
                 </li>
             </ul>
+            </div>
 
             <?php if (!$adminPersonal) { ?>
             <details class="gc_tree_new" id="new-folder">
