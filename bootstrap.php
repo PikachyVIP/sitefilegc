@@ -11,7 +11,7 @@ require_once __DIR__ . '/session.php';
 
 const GC_APP_NAME = 'GC Files';
 const GC_APP_VERSION = '2.2.0';
-const GC_ASSET_VERSION = '2.2.22';
+const GC_ASSET_VERSION = '2.2.23';
 
 // Hard ceiling for every uploaded file, independent of php.ini. 20 GiB.
 const GC_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;

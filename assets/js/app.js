@@ -763,6 +763,7 @@
         var logLink = widget.querySelector('[data-upload-log]');
 
         var DB_NAME = 'gc_upload_queue';
+        var DB_VERSION = 2;
         var STORE = 'items';
         var CHUNK = 32 * 1024 * 1024;
         var MAX_FILE = 20 * 1024 * 1024 * 1024;
@@ -788,6 +789,7 @@
         var LOG_KEY = 'gc_upload_log_' + uidScope;
         var logEvents = [];
         var logTimer = 0;
+        var legacyPurged = false;
 
         try {
             var storedLog = window.sessionStorage.getItem(LOG_KEY);
@@ -903,13 +905,26 @@
         function openDb() {
             return new Promise(function (resolve, reject) {
                 if (!window.indexedDB) { reject(new Error('IndexedDB недоступен')); return; }
-                var request = window.indexedDB.open(DB_NAME, 1);
+                var request = window.indexedDB.open(DB_NAME, DB_VERSION);
                 request.onupgradeneeded = function () {
-                    if (!request.result.objectStoreNames.contains(STORE)) {
-                        request.result.createObjectStore(STORE, { keyPath: 'id' });
+                    // v1 stored the File blobs themselves. A 19 GB queue filled
+                    // IndexedDB and blocked the first request, so v2 keeps only
+                    // metadata. Deleting the old store also frees that space.
+                    if (request.result.objectStoreNames.contains(STORE)) {
+                        request.result.deleteObjectStore(STORE);
+                        legacyPurged = true;
                     }
+                    request.result.createObjectStore(STORE, { keyPath: 'id' });
                 };
-                request.onsuccess = function () { resolve(request.result); };
+                request.onsuccess = function () {
+                    var database = request.result;
+                    database.onversionchange = function () { database.close(); };
+                    resolve(database);
+                };
+                request.onblocked = function () {
+                    logUpload('db_blocked', { message: 'IndexedDB upgrade blocked by another tab' });
+                    reject(new Error('IndexedDB занят другой вкладкой. Закройте старые вкладки сайта.'));
+                };
                 request.onerror = function () { reject(request.error || new Error('IndexedDB недоступен')); };
             });
         }
@@ -924,12 +939,20 @@
             });
         }
 
+        function queueRecord(item) {
+            var copy = {};
+            Object.keys(item).forEach(function (key) {
+                if (key !== 'file') copy[key] = item[key];
+            });
+            return copy;
+        }
+
         function dbPut(item) {
             if (!db) return Promise.resolve();
             return new Promise(function (resolve) {
                 try {
                     var tx = db.transaction(STORE, 'readwrite');
-                    tx.objectStore(STORE).put(item);
+                    tx.objectStore(STORE).put(queueRecord(item));
                     tx.oncomplete = function () { resolve(); };
                     tx.onerror = function () { resolve(); };
                 } catch (error) {
@@ -1030,10 +1053,11 @@
                     ? 'Осталось ' + pending.length
                     : 'Готово';
             }
+            var needsFiles = queue.some(function (item) { return item.state === 'needs_file'; });
             if (currentEl) {
                 currentEl.textContent = active
                     ? active.name
-                    : (pending.length ? 'Подготовка…' : 'Все файлы загружены');
+                    : (needsFiles ? 'Нужно выбрать файлы заново' : (pending.length ? 'Подготовка…' : 'Все файлы загружены'));
             }
             if (filePercentEl) {
                 var filePercent = active && active.size
@@ -1053,6 +1077,8 @@
                     noteEl.textContent = 'Загрузка остановилась. Можно повторить с места остановки.';
                 } else if (!pending.length) {
                     noteEl.textContent = 'Файлы сохранены в хранилище.';
+                } else if (needsFiles) {
+                    noteEl.textContent = 'Браузер не хранит сами файлы. Выберите их заново, чтобы продолжить с сохранённого места.';
                 } else {
                     noteEl.textContent = 'Можно свернуть: загрузка продолжится в фоне.';
                 }
@@ -1074,7 +1100,11 @@
                     state.className = 'gc_upload_item_state';
                     state.textContent = item.state === 'done' || item.state === 'staged'
                         ? 'готово'
-                        : (item.state === 'error' ? 'ошибка' : (item.state === 'uploading' ? 'идёт' : 'в очереди'));
+                        : (item.state === 'error'
+                            ? 'ошибка'
+                            : (item.state === 'needs_file'
+                                ? 'выбрать заново'
+                                : (item.state === 'uploading' ? 'идёт' : 'в очереди')));
                     li.appendChild(name);
                     li.appendChild(state);
                     list.appendChild(li);
@@ -1353,6 +1383,13 @@
 
         function uploadItem(item) {
             if (clearing) return Promise.resolve();
+            if (!item.file) {
+                item.state = 'needs_file';
+                item.error = 'Выберите файл заново.';
+                save(item);
+                render();
+                return Promise.resolve();
+            }
             item.attempts = (item.attempts || 0) + 1;
             item.state = 'uploading';
             item.error = '';
@@ -1516,7 +1553,7 @@
             var next = function () {
                 var item = null;
                 for (var i = 0; i < queue.length; i++) {
-                    if (queue[i].state === 'queued') { item = queue[i]; break; }
+                    if (queue[i].state === 'queued' && queue[i].file) { item = queue[i]; break; }
                 }
                 if (!item) {
                     processing = false;
@@ -1543,6 +1580,7 @@
         function enqueue(files) {
             var now = Date.now();
             var added = 0;
+            var reattached = 0;
             notice = '';
             noticeUntil = 0;
             if (hideTimer) {
@@ -1556,10 +1594,32 @@
                     window.alert('Файл «' + file.name + '» больше 20 ГБ.');
                     return;
                 }
+                var path = entry.path || file.webkitRelativePath || file.name;
+                var existing = null;
+                for (var i = 0; i < queue.length; i++) {
+                    var candidate = queue[i];
+                    if (candidate.state === 'needs_file'
+                        && candidate.name === file.name
+                        && candidate.size === file.size
+                        && (candidate.path || candidate.name) === path) {
+                        existing = candidate;
+                        break;
+                    }
+                }
+                if (existing) {
+                    existing.file = file;
+                    existing.state = 'queued';
+                    existing.error = '';
+                    existing.attempts = 0;
+                    existing.loaded = existing.offset || 0;
+                    save(existing);
+                    reattached++;
+                    return;
+                }
                 queue.push({
                     id: uid(),
                     name: file.name,
-                    path: entry.path || file.webkitRelativePath || file.name,
+                    path: path,
                     size: file.size,
                     offset: 0,
                     loaded: 0,
@@ -1572,10 +1632,11 @@
                 });
                 added++;
             });
-            if (!added) return;
-            queue.slice(-added).forEach(function (item) { save(item); });
+            if (!added && !reattached) return;
+            queue.filter(function (item) { return item.state === 'queued'; }).forEach(function (item) { save(item); });
             logUpload('queue_add', {
                 added: added,
+                reattached: reattached,
                 queued: queue.length,
                 bytes: queue.reduce(function (sum, item) { return sum + (item.size || 0); }, 0)
             });
@@ -1664,24 +1725,51 @@
             var clearedAt = clearMarker();
             var dropped = [];
             queue = (items || []).filter(function (item) {
-                if (!item || !item.file || !item.id) return false;
+                if (!item || !item.id) return false;
                 if (clearedAt > 0 && (Number(item.createdAt) || 0) < clearedAt) {
                     dropped.push(item);
                     return false;
                 }
                 return true;
             }).map(function (item) {
-                if (item.state === 'uploading') item.state = 'queued';
+                // v2 stores metadata only. The File cannot survive a reload,
+                // so keep the server offset and wait for the same file again.
+                item.file = null;
+                if (item.state !== 'staged') {
+                    item.state = 'needs_file';
+                    item.error = 'Выберите файл заново.';
+                }
                 item.attempts = Math.max(0, Math.min(MAX_ATTEMPTS - 1, Number(item.attempts) || 0));
                 return item;
             });
             dropped.forEach(function (item) { dbDelete(item.id); });
-            logUpload('restore', { found: (items || []).length, kept: queue.length, dropped: dropped.length, clear_marker: clearedAt });
-            if (!queue.length) return;
+            if (legacyPurged) {
+                notice = 'Очередь сброшена после обновления: браузер больше не хранит копии файлов. Выберите их заново.';
+                noticeUntil = Date.now() + 4500;
+            }
+            logUpload('restore', {
+                found: (items || []).length,
+                kept: queue.length,
+                dropped: dropped.length,
+                clear_marker: clearedAt,
+                legacy_purged: legacyPurged,
+                needs_file: queue.filter(function (item) { return item.state === 'needs_file'; }).length
+            });
+            if (!queue.length) {
+                if (notice) {
+                    widget.hidden = false;
+                    setState('done');
+                    render();
+                    scheduleNoticeHide();
+                }
+                return;
+            }
             widget.hidden = false;
-            setState('uploading');
+            setState(queue.every(function (item) { return item.state === 'staged'; }) ? 'idle' : 'uploading');
             render();
-            runQueue();
+            if (queue.every(function (item) { return item.state === 'staged'; })) {
+                commitQueue();
+            }
         }).catch(function (error) {
             logUpload('restore_error', { message: error && error.message ? error.message : String(error) });
         });
