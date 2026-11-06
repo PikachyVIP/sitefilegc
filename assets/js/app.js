@@ -1032,17 +1032,18 @@
                     return;
                 }
                 widget.hidden = false;
-                if (titleEl) titleEl.textContent = 'Очередь очищена';
-                if (currentEl) currentEl.textContent = '';
-                if (filePercentEl) filePercentEl.textContent = '0%';
-                if (fill) fill.style.width = '0%';
-                if (bar) bar.setAttribute('aria-valuenow', '0');
-                if (percentEl) percentEl.textContent = '0%';
+                var finished = widget.classList.contains('is-done');
+                if (titleEl) titleEl.textContent = finished ? 'Готово' : 'Очередь очищена';
+                if (currentEl) currentEl.textContent = finished ? 'Все файлы загружены' : '';
+                if (filePercentEl) filePercentEl.textContent = finished ? '100%' : '0%';
+                if (fill) fill.style.width = finished ? '100%' : '0%';
+                if (bar) bar.setAttribute('aria-valuenow', finished ? '100' : '0');
+                if (percentEl) percentEl.textContent = finished ? '100%' : '0%';
                 if (sizeEl) sizeEl.textContent = '';
                 if (noteEl) noteEl.textContent = notice;
                 if (retry) retry.hidden = true;
                 if (clear) clear.hidden = true;
-                if (refresh) refresh.hidden = true;
+                if (refresh) refresh.hidden = !finished;
                 if (list) list.innerHTML = '';
                 return;
             }
@@ -1144,34 +1145,6 @@
             }, 4500);
         }
 
-        function dropItem(item, message) {
-            item.state = 'error';
-            var index = queue.indexOf(item);
-            if (index >= 0) queue.splice(index, 1);
-            logUpload('item_drop', {
-                id: item.id,
-                name: item.name,
-                attempts: item.attempts || 0,
-                error: item.error || '',
-                message: message || ''
-            });
-            dbDelete(item.id);
-            deleteRemote(item);
-            active = null;
-            notice = message || '';
-            noticeUntil = notice ? Date.now() + 4500 : 0;
-            if (!queue.length) {
-                setState('done');
-                render();
-                scheduleNoticeHide();
-                return;
-            }
-            setState('uploading');
-            render();
-            scheduleNoticeHide();
-            window.setTimeout(function () { runQueue(); }, 0);
-        }
-
         function clearTransfer(message) {
             if (clearing) return;
             if (!queue.length) {
@@ -1261,7 +1234,12 @@
                 return;
             }
             if ((item.attempts || 0) >= MAX_ATTEMPTS) {
-                dropItem(item, 'Файл «' + item.name + '» не загрузился после ' + MAX_ATTEMPTS + ' попыток и удалён из очереди.');
+                item.error += ' Файл остался в очереди — нажмите «Повторить», чтобы продолжить с этого места.';
+                save(item);
+                active = null;
+                setState('error');
+                render();
+                if (noteEl) noteEl.textContent = item.error;
                 return;
             }
             item.error += ' Попытка ' + item.attempts + ' из ' + MAX_ATTEMPTS + '. Повторю автоматически.';
@@ -1312,6 +1290,7 @@
                 xhr.setRequestHeader('X-GC-Request-ID', requestId);
                 xhr.setRequestHeader('X-GC-OFFSET', String(item.offset));
                 xhr.setRequestHeader('X-GC-TOTAL', String(item.size));
+                xhr.timeout = 600000;
                 xhr.setRequestHeader('X-GC-META', blobToBase64(JSON.stringify({
                     name: item.name,
                     path: item.path,
@@ -1376,6 +1355,11 @@
                     finish();
                     logUpload('chunk_abort', { id: item.id, name: item.name, duration_ms: Date.now() - startedAt });
                     reject(new Error('Загрузка отменена.'));
+                });
+                xhr.addEventListener('timeout', function () {
+                    finish();
+                    logUpload('chunk_timeout', { id: item.id, name: item.name, duration_ms: Date.now() - startedAt });
+                    reject(new Error('Сервер не ответил за 10 минут. Повторю автоматически.'));
                 });
                 xhr.send(blob);
             });
@@ -1505,15 +1489,26 @@
                     return payload;
                 });
             }).then(function (payload) {
-                return Promise.all(queue.map(function (item) { return dbDelete(item.id); })).then(function () {
+                return Promise.all(staged.map(function (item) { return dbDelete(item.id); })).then(function () {
                     logUpload('commit_ok', { files: staged.length, uploaded: payload.uploaded || 0 });
-                    queue = [];
+                    queue = queue.filter(function (item) { return staged.indexOf(item) < 0; });
+                    committing = false;
                     commitAttempts = 0;
-                    setState('done');
-                    render();
-                    if (payload.redirect) {
-                        window.setTimeout(function () { window.location.href = payload.redirect; }, 300);
+                    if (queue.length) {
+                        // Never reload the page while part of the batch is still
+                        // waiting: after a reload the browser cannot re-read the
+                        // selected files, and the user would be asked to pick
+                        // hundreds of files again.
+                        setState('uploading');
+                        render();
+                        runQueue();
+                        return;
                     }
+                    setState('done');
+                    notice = 'Все файлы сохранены в хранилище.';
+                    noticeUntil = Date.now() + 8000;
+                    render();
+                    scheduleNoticeHide();
                 });
             }).catch(function (error) {
                 committing = false;
@@ -1530,19 +1525,18 @@
                     return;
                 }
                 commitAttempts++;
-                if (commitAttempts >= MAX_ATTEMPTS) {
-                    clearTransfer('Файлы не сохранились после ' + MAX_ATTEMPTS + ' попыток. Очередь очищена.');
-                    return;
-                }
                 staged.forEach(function (item) {
                     item.state = 'staged';
                 });
                 setState('error');
                 if (retry) retry.hidden = false;
+                if (clear) clear.hidden = false;
                 render();
                 if (noteEl) {
                     noteEl.textContent = (error.message || 'Файлы переданы, но не сохранены. Повторите.')
-                        + ' Попытка ' + commitAttempts + ' из ' + MAX_ATTEMPTS + '.';
+                        + (commitAttempts >= MAX_ATTEMPTS
+                            ? ' Файлы остались в очереди — нажмите «Повторить».'
+                            : ' Попытка ' + commitAttempts + ' из ' + MAX_ATTEMPTS + '.');
                 }
             });
         }
@@ -1567,10 +1561,8 @@
                     return;
                 }
                 uploadItem(item).then(function () {
-                    if (item.state === 'error') {
-                        processing = false;
-                        return;
-                    }
+                    // A single bad file must not stop the other 379: keep
+                    // draining the queue and leave the failed item for retry.
                     next();
                 });
             };
@@ -1711,9 +1703,32 @@
         if (refresh) {
             refresh.addEventListener('click', function (event) {
                 event.preventDefault();
+                if (queue.length) {
+                    if (noteEl) noteEl.textContent = 'Загрузка ещё идёт. Дождитесь окончания.';
+                    return;
+                }
                 window.location.reload();
             });
         }
+
+        window.addEventListener('beforeunload', function (event) {
+            var unfinished = queue.some(function (item) {
+                return item.state === 'queued' || item.state === 'uploading' || item.state === 'staged';
+            });
+            if (!unfinished) return;
+            event.preventDefault();
+            event.returnValue = '';
+        });
+
+        window.addEventListener('pagehide', function () {
+            if (!queue.length) return;
+            logUpload('pagehide', {
+                queue: queue.length,
+                pending: itemsPending().length,
+                staged: queue.filter(function (item) { return item.state === 'staged'; }).length
+            });
+            flushLog();
+        });
 
         openDb().then(function (database) {
             db = database;
