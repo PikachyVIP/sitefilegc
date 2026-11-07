@@ -153,6 +153,13 @@ function gc_base_url(): string
     if (!preg_match('/^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/', $host)) {
         $host = 'localhost';
     }
+    $port = (int) ($_SERVER['SERVER_PORT'] ?? 0);
+    if ($port > 0
+        && !str_contains($host, ':')
+        && (($https && $port !== 443) || (!$https && $port !== 80))
+    ) {
+        $host .= ':' . $port;
+    }
     $script = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
     $dir = rtrim(str_replace('\\', '/', dirname($script)), '/');
 

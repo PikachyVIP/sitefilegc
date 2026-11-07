@@ -79,6 +79,7 @@ function gc_curtain(string $active = ''): void
         ['apps.php', 'apps', 'grid', 'Приложения', 'Обновления приложений команды'],
         ['storage.php', 'storage', 'folder', 'Хранилище', 'Основное хранилище'],
         ['transfer.php', 'transfer', 'swap', 'Трансфер', 'Временный трансфер'],
+        ['hosting.php', 'hosting', 'hosting', 'Хостинг', 'Фото и видео по ссылке'],
         ['profile.php', 'profile', 'user', 'Профиль', 'Профиль и доступы'],
     ];
     if (gc_can_admin()) {
@@ -232,6 +233,9 @@ function gc_foot(array $options = []): void
         <a class="gc_upload_widget_log" data-upload-log href="#" hidden>Скачать журнал загрузки</a>
     </section>
 </div>
+<?php } ?>
+<?php foreach ((array) ($options['scripts'] ?? []) as $script) { ?>
+<script src="<?= gc_h((string) $script) ?>?v=<?= rawurlencode(GC_ASSET_VERSION) ?>" defer></script>
 <?php } ?>
 <script src="assets/js/app.js?v=<?= rawurlencode(GC_ASSET_VERSION) ?>" defer></script>
 </body>

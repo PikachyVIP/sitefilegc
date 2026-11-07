@@ -50,4 +50,8 @@ printf '%s' "$api" | grep -q '"ok":true' || fail "update_api.php did not return 
 status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" "$base/upload_logs.php")"
 [ "$status" = "200" ] || fail "upload_logs.php returned HTTP $status"
 
+# 8. The media hosting page renders for an authenticated user.
+body="$(curl -fsS -b "$jar" "$base/hosting.php")"
+printf '%s' "$body" | grep -q 'gc_hosting' || fail "hosting page did not render"
+
 echo "smoke: ok"
