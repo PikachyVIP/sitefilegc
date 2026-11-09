@@ -3361,6 +3361,11 @@ dialog.gc_preview_modal { width: min(980px, calc(100vw - 24px)); }
 .gc_player_mute::after { content: ''; position: absolute; left: 9px; top: 1px; width: 7px; height: 10px; border: 1.5px solid currentColor; border-left: 0; border-radius: 0 9px 9px 0; }
 .gc_player_btn.is-muted .gc_player_mute::after { display: none; }
 .gc_player_btn.is-muted .gc_player_mute { opacity: .45; }
+.gc_player_vol { flex: none; display: flex; align-items: center; gap: 3px; }
+.gc_player_volume { width: 70px; height: 16px; margin: 0; accent-color: var(--gc_accent); cursor: pointer; }
+.gc_player_fail { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; background: rgba(3, 1, 11, .88); color: #fff; text-align: center; font-size: 13px; }
+.gc_player_fail[hidden] { display: none; }
+.gc_player.is-error .gc_player_big, .gc_player.is-error .gc_player_controls { opacity: 0; pointer-events: none; }
 .gc_player_full { width: 12px; height: 12px; border: 1.5px solid currentColor; border-radius: 2px; box-shadow: inset 0 0 0 2px #03010b, inset 0 0 0 3.5px currentColor; }
 @media (max-width: 900px) {
     .gc_hosting_layout { grid-template-columns: 1fr; }
@@ -3378,6 +3383,7 @@ dialog.gc_preview_modal { width: min(980px, calc(100vw - 24px)); }
     .gc_hosting_public_actions .gc_btn { flex: 1 1 auto; justify-content: center; }
     .gc_player_controls { gap: 5px; padding: 8px 6px; }
     .gc_player_time { min-width: 30px; font-size: 9px; }
+    .gc_player_volume { width: 48px; }
     .gc_player_big { width: 54px; height: 54px; }
     .gc_curtain_link { width: 46px; padding: 11px 2px 9px; }
     .gc_curtain_link .gc_ico { width: 19px; height: 19px; }

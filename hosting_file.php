@@ -105,12 +105,13 @@ if ($partial) {
 }
 
 $download = isset($_GET['download']) && $_GET['download'] === '1';
-$fallbackName = preg_replace('/[^A-Za-z0-9._-]+/', '_', (string) $row['original_name']) ?: 'media';
-header(
-    'Content-Disposition: ' . ($download ? 'attachment' : 'inline')
-    . '; filename="' . $fallbackName . '"'
-    . "; filename*=UTF-8''" . rawurlencode((string) $row['original_name'])
-);
+if ($download) {
+    $fallbackName = preg_replace('/[^A-Za-z0-9._-]+/', '_', (string) $row['original_name']) ?: 'media';
+    header(
+        'Content-Disposition: attachment; filename="' . $fallbackName . '"'
+        . "; filename*=UTF-8''" . rawurlencode((string) $row['original_name'])
+    );
+}
 
 session_write_close();
 

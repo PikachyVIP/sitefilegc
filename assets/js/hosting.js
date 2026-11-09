@@ -160,6 +160,7 @@
     function initPlayer(root) {
         var video = $('[data-gc-video]', root);
         if (!video) return;
+        video.removeAttribute('controls');
 
         var big = $('.gc_player_big', root);
         var toggles = $$('[data-gc-toggle]', root);
@@ -167,9 +168,12 @@
         var current = $('[data-gc-current]', root);
         var duration = $('[data-gc-duration]', root);
         var mute = $('[data-gc-mute]', root);
+        var volume = $('[data-gc-volume]', root);
+        var fail = $('[data-gc-video-error]', root);
         var full = $('[data-gc-fullscreen]', root);
         var playIcon = $('[data-gc-play-icon]', root);
         var seeking = false;
+        var lastVolume = video.volume > 0 ? video.volume : 1;
 
         function isPlaying() {
             return !video.paused && !video.ended;
@@ -180,6 +184,30 @@
             root.classList.toggle('is-playing', playing);
             if (big) big.setAttribute('aria-label', playing ? 'Пауза' : 'Воспроизвести');
             if (playIcon) playIcon.classList.toggle('is-pause', playing);
+        }
+
+        function paintVolume() {
+            var off = video.muted || video.volume === 0;
+            if (volume) volume.value = String(off ? 0 : video.volume);
+            if (mute) {
+                mute.classList.toggle('is-muted', off);
+                mute.setAttribute('aria-label', off ? 'Включить звук' : 'Без звука');
+            }
+        }
+
+        function setVolume(next, unmute) {
+            next = Number(next);
+            if (!isFinite(next)) next = 1;
+            next = Math.max(0, Math.min(1, next));
+            if (next > 0) lastVolume = next;
+            video.volume = next;
+            if (unmute && next > 0) video.muted = false;
+            paintVolume();
+        }
+
+        function showVideoError() {
+            if (fail) fail.hidden = false;
+            root.classList.add('is-error');
         }
 
         function toggle() {
@@ -236,11 +264,26 @@
 
         if (mute) {
             mute.addEventListener('click', function () {
-                video.muted = !video.muted;
-                mute.classList.toggle('is-muted', video.muted);
-                mute.setAttribute('aria-label', video.muted ? 'Включить звук' : 'Без звука');
+                if (video.muted || video.volume === 0) {
+                    setVolume(lastVolume > 0 ? lastVolume : 1, true);
+                } else {
+                    lastVolume = video.volume;
+                    video.muted = true;
+                    paintVolume();
+                }
             });
         }
+        if (volume) {
+            volume.addEventListener('input', function () {
+                setVolume(volume.value, true);
+            });
+        }
+        video.addEventListener('volumechange', paintVolume);
+        paintVolume();
+
+        var source = $('source', video);
+        if (source) source.addEventListener('error', showVideoError);
+        video.addEventListener('error', showVideoError);
 
         function enterFullscreen() {
             var target = root;

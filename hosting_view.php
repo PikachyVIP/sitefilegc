@@ -75,16 +75,25 @@ gc_public_bar();
         <div class="gc_hosting_stage">
             <?php if ($kind === 'video') { ?>
             <div class="gc_player" data-gc-player>
-                <video data-gc-video playsinline preload="metadata" src="<?= gc_h($directUrl) ?>"></video>
+                <video data-gc-video controls playsinline webkit-playsinline preload="metadata">
+                    <source src="<?= gc_h($directUrl) ?>" type="<?= gc_h($mime) ?>">
+                </video>
                 <button type="button" class="gc_player_big" data-gc-toggle aria-label="Воспроизвести">
                     <span class="gc_player_big_icon" aria-hidden="true"></span>
                 </button>
+                <div class="gc_player_fail" data-gc-video-error hidden>
+                    <span>Браузер не смог открыть это видео.</span>
+                    <a class="gc_btn gc_btn--outline gc_btn--sm" href="<?= gc_h($downloadUrl) ?>">Скачать файл</a>
+                </div>
                 <div class="gc_player_controls">
                     <button type="button" class="gc_player_btn" data-gc-toggle aria-label="Воспроизвести"><span class="gc_player_play" data-gc-play-icon aria-hidden="true"></span></button>
                     <span class="gc_player_time" data-gc-current>0:00</span>
                     <input class="gc_player_seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Перемотка" data-gc-seek>
                     <span class="gc_player_time" data-gc-duration>0:00</span>
-                    <button type="button" class="gc_player_btn" data-gc-mute aria-label="Без звука"><span class="gc_player_mute" data-gc-mute-icon aria-hidden="true"></span></button>
+                    <div class="gc_player_vol">
+                        <button type="button" class="gc_player_btn" data-gc-mute aria-label="Без звука"><span class="gc_player_mute" data-gc-mute-icon aria-hidden="true"></span></button>
+                        <input class="gc_player_volume" type="range" min="0" max="1" value="1" step="0.01" aria-label="Громкость" data-gc-volume>
+                    </div>
                     <button type="button" class="gc_player_btn" data-gc-fullscreen aria-label="На весь экран"><span class="gc_player_full" aria-hidden="true"></span></button>
                 </div>
             </div>
