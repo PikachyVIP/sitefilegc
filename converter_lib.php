@@ -42,6 +42,22 @@ function gc_conv_which(string $name): ?string
     }
 
     $windows = DIRECTORY_SEPARATOR === '\\';
+
+    // Bundled user-space tools win over PATH: the production host has no apt
+    // access, so ffmpeg/ffprobe live in bin/ next to the site.
+    $bundledDirs = [];
+    $configured = getenv('GC_CONVERT_BIN');
+    if (is_string($configured) && $configured !== '') {
+        $bundledDirs[] = rtrim($configured, '/\\');
+    }
+    $bundledDirs[] = __DIR__ . '/bin';
+    foreach ($bundledDirs as $dir) {
+        $candidate = $dir . '/' . $name . ($windows ? '.exe' : '');
+        if (is_file($candidate) && is_executable($candidate)) {
+            return $candidate;
+        }
+    }
+
     $command = ($windows ? 'where ' : 'command -v ')
         . escapeshellarg($name)
         . ' 2>' . ($windows ? 'NUL' : '/dev/null');
@@ -101,9 +117,10 @@ function gc_conv_catalog(): array
 
     $tools = gc_conv_tools();
     $gd = function_exists('imagecreatetruecolor');
+    $ffmpeg = $tools['ffmpeg'] !== null;
 
     $image = [];
-    if ($gd) {
+    if ($gd || $ffmpeg) {
         $image = [
             'jpg'  => ['label' => 'JPG',  'quality' => 'image'],
             'png'  => ['label' => 'PNG',  'quality' => 'image'],
@@ -111,7 +128,7 @@ function gc_conv_catalog(): array
             'gif'  => ['label' => 'GIF',  'quality' => 'image'],
             'bmp'  => ['label' => 'BMP',  'quality' => 'image'],
         ];
-        if (function_exists('imageavif')) {
+        if (($gd && function_exists('imageavif')) || $ffmpeg) {
             $image['avif'] = ['label' => 'AVIF', 'quality' => 'image'];
         }
         if ($tools['tesseract'] !== null) {

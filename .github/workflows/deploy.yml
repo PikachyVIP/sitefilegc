@@ -63,15 +63,57 @@ jobs:
             --exclude='tests/' \
             --exclude='uploads/' \
             --exclude='updates/' \
+            --exclude='bin/' \
             --exclude='configfile.ini' \
             --exclude='*.log' \
             ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+      - name: Install converter media tools
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'EOF'
+          set -eu
+          cd "$DEPLOY_PATH"
+          mkdir -p bin
+          if [ ! -x bin/ffmpeg ] || [ ! -x bin/ffprobe ]; then
+            url=https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            tmp=$(mktemp -d)
+            curl -fsSL --retry 3 "$url" -o "$tmp/ffmpeg.tar.xz"
+            tar -xJf "$tmp/ffmpeg.tar.xz" -C "$tmp"
+            dir=$(find "$tmp" -maxdepth 1 -type d -name 'ffmpeg-*-static' | head -n 1)
+            install -m 755 "$dir/ffmpeg" bin/ffmpeg
+            install -m 755 "$dir/ffprobe" bin/ffprobe
+            rm -rf "$tmp"
+          fi
+          bin/ffmpeg -version | head -n 1
+          EOF
 
       - name: Lint deployed PHP
         run: |
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
             "$SSH_USER@$SSH_HOST" \
             "cd '$DEPLOY_PATH' && find . -path './uploads' -prune -o -path './updates' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null"
+
+      - name: Verify converter catalog
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'EOF'
+          set -eu
+          cd "$DEPLOY_PATH"
+          php -r '
+            require "converter_lib.php";
+            require "converter_engine.php";
+            $tools = gc_conv_tools();
+            $catalog = gc_conv_catalog();
+            $formats = 0;
+            foreach ($catalog as $group) { $formats += count($group["outputs"]); }
+            echo "formats=", $formats, " ffmpeg=", ($tools["ffmpeg"] ?? "none"), PHP_EOL;
+            gc_conv_do_image("assets/img/logo.png", "png", "/tmp/gc-conv-check.webp", "webp", "medium", "/tmp/gc-conv-check.log");
+            echo "webp=", filesize("/tmp/gc-conv-check.webp"), " bytes", PHP_EOL;
+            @unlink("/tmp/gc-conv-check.webp");
+            @unlink("/tmp/gc-conv-check.log");
+          '
+          EOF
 
       - name: Health check
         if: env.DEPLOY_URL != ''

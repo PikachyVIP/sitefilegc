@@ -298,8 +298,10 @@ function gc_conv_audio_bitrate(string $quality): string
 
 function gc_conv_do_image(string $input, string $inputExt, string $output, string $format, string $quality, string $log): void
 {
-    if (!function_exists('imagecreatetruecolor')) {
-        throw new RuntimeException('PHP GD не установлен — изображения недоступны.');
+    if (!function_exists('imagecreatetruecolor') || getenv('GC_CONVERT_FFMPEG_IMAGES') === '1') {
+        // Production PHP has no GD: ffmpeg covers the same image formats.
+        gc_conv_do_image_ffmpeg($input, $inputExt, $output, $format, $quality, $log);
+        return;
     }
 
     $loader = match (strtolower($inputExt)) {
@@ -364,6 +366,64 @@ function gc_conv_do_image(string $input, string $inputExt, string $output, strin
         throw new RuntimeException('GD не смог записать ' . strtoupper($format) . '.');
     }
     @file_put_contents($log, "image {$inputExt} -> {$format}, {$width}x{$height}\n", FILE_APPEND);
+}
+
+function gc_conv_do_image_ffmpeg(string $input, string $inputExt, string $output, string $format, string $quality, string $log): void
+{
+    $ffmpeg = gc_conv_tools()['ffmpeg'];
+    if ($ffmpeg === null) {
+        throw new RuntimeException('Нет ни GD, ни ffmpeg — изображения недоступны.');
+    }
+
+    $q = gc_conv_image_quality($quality);
+    $args = [$ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-i', $input, '-frames:v', '1'];
+    switch ($format) {
+        case 'jpg':
+            $args[] = '-q:v';
+            $args[] = (string) ($q >= 88 ? 2 : ($q >= 75 ? 5 : 8));
+            break;
+        case 'png':
+            $args[] = '-compression_level';
+            $args[] = '6';
+            $args[] = '-pix_fmt';
+            $args[] = 'rgba';
+            break;
+        case 'webp':
+            $args[] = '-c:v';
+            $args[] = 'libwebp';
+            $args[] = '-quality';
+            $args[] = (string) $q;
+            $args[] = '-pix_fmt';
+            $args[] = 'yuva420p';
+            break;
+        case 'avif':
+            $args[] = '-c:v';
+            $args[] = 'libaom-av1';
+            $args[] = '-still-picture';
+            $args[] = '1';
+            $args[] = '-crf';
+            $args[] = (string) ($q >= 88 ? 24 : ($q >= 75 ? 32 : 40));
+            $args[] = '-pix_fmt';
+            $args[] = 'yuva420p';
+            break;
+        case 'gif':
+            $args[] = '-loop';
+            $args[] = '0';
+            break;
+        case 'bmp':
+            break;
+        default:
+            throw new RuntimeException('Неизвестный формат изображения: ' . $format);
+    }
+    $args[] = $output;
+
+    gc_conv_assert_ok(gc_conv_command($args, 300, $log), 'ffmpeg');
+
+    if (!is_file($output) || filesize($output) === 0) {
+        @unlink($output);
+        throw new RuntimeException('ffmpeg не смог записать ' . strtoupper($format) . '.');
+    }
+    @file_put_contents($log, "image {$inputExt} -> {$format} via ffmpeg, " . filesize($output) . " bytes\n", FILE_APPEND);
 }
 
 function gc_conv_do_media(string $input, string $output, string $format, string $quality, string $log): void
