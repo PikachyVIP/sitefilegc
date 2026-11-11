@@ -64,6 +64,8 @@ jobs:
             --exclude='uploads/' \
             --exclude='updates/' \
             --exclude='bin/' \
+            --exclude='converter_py/.venv/' \
+            --exclude='converter_py/**/__pycache__/' \
             --exclude='configfile.ini' \
             --exclude='*.log' \
             ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
@@ -88,6 +90,20 @@ jobs:
           bin/ffmpeg -version | head -n 1
           EOF
 
+      - name: Install Python converter
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'EOF'
+          set -eu
+          cd "$DEPLOY_PATH"
+          if [ ! -x converter_py/.venv/bin/python ]; then
+            python3 -m venv converter_py/.venv
+          fi
+          converter_py/.venv/bin/pip install --upgrade pip wheel >/dev/null
+          converter_py/.venv/bin/pip install -r converter_py/requirements.txt
+          converter_py/.venv/bin/python -c "import sys, types; sys.path.insert(0, 'converter_py'); sys.modules.setdefault('weasyprint', types.ModuleType('weasyprint')); from registry.registry import ConverterRegistry; print('converters=', len(ConverterRegistry(skip_unregisterable=False).converters))"
+          EOF
+
       - name: Lint deployed PHP
         run: |
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
@@ -102,16 +118,14 @@ jobs:
           cd "$DEPLOY_PATH"
           php -r '
             require "converter_lib.php";
-            require "converter_engine.php";
             $tools = gc_conv_tools();
-            $catalog = gc_conv_catalog();
-            $formats = 0;
-            foreach ($catalog as $group) { $formats += count($group["outputs"]); }
-            echo "formats=", $formats, " ffmpeg=", ($tools["ffmpeg"] ?? "none"), PHP_EOL;
-            gc_conv_do_image("assets/img/logo.png", "png", "/tmp/gc-conv-check.webp", "webp", "medium", "/tmp/gc-conv-check.log");
-            echo "webp=", filesize("/tmp/gc-conv-check.webp"), " bytes", PHP_EOL;
-            @unlink("/tmp/gc-conv-check.webp");
-            @unlink("/tmp/gc-conv-check.log");
+            echo "inputs=", gc_conv_full_input_count(), " pairs=", gc_conv_full_pair_count(),
+                " python=", (gc_conv_python_config() !== null ? "yes" : "no"),
+                " ffmpeg=", ($tools["ffmpeg"] ?? "none"), PHP_EOL;
+            if (gc_conv_full_input_count() !== 166 || gc_conv_full_pair_count() !== 3023) {
+                fwrite(STDERR, "unexpected converter catalog\n");
+                exit(1);
+            }
           '
           EOF
 

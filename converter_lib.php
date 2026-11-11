@@ -69,6 +69,102 @@ function gc_conv_which(string $name): ?string
     return $code === 0 && $path !== '' ? $path : null;
 }
 
+/**
+ * Python executable + reference backend. Both are optional: without them the
+ * small native catalogue still works, and every full pair reports a clear
+ * "bridge is not configured" error instead of silently doing nothing.
+ */
+function gc_conv_python_config(): ?array
+{
+    static $config = false;
+    if ($config !== false) {
+        return $config;
+    }
+
+    $python = getenv('GC_CONVERT_PYTHON');
+    $python = is_string($python) && $python !== '' ? $python : null;
+    if ($python === null) {
+        $relative = [
+            __DIR__ . '/converter_py/.venv/bin/python3',
+            __DIR__ . '/converter_py/venv/bin/python3',
+            __DIR__ . '/converter_py/.venv/bin/python',
+        ];
+        foreach ($relative as $candidate) {
+            if (is_file($candidate)) {
+                $python = $candidate;
+                break;
+            }
+        }
+    }
+    $backend = getenv('GC_CONVERTER_BACKEND');
+    $backend = is_string($backend) && $backend !== '' ? $backend : null;
+    if ($backend === null) {
+        foreach ([__DIR__ . '/converter_py'] as $candidate) {
+            if (is_file($candidate . '/registry/registry.py')) {
+                $backend = $candidate;
+                break;
+            }
+        }
+    }
+
+    $bridge = __DIR__ . '/converter_bridge.py';
+    $config = ($python !== null && $backend !== null && is_file($bridge))
+        ? ['python' => $python, 'backend' => $backend, 'bridge' => $bridge]
+        : null;
+    return $config;
+}
+
+/** @return array{output:string,output_name:string,output_size:int} */
+function gc_conv_do_python(string $input, string $inputFormat, string $format, string $converter, string $quality, string $dir, string $log): array
+{
+    $config = gc_conv_python_config();
+    if ($config === null) {
+        throw new RuntimeException('Python-конвертер не настроен: нужен converter_py и venv.');
+    }
+
+    $resultFile = $dir . '/bridge.json';
+    @unlink($resultFile);
+    $args = [
+        $config['python'], $config['bridge'],
+        '--input', $input,
+        '--output-dir', $dir,
+        '--input-format', $inputFormat,
+        '--output-format', $format,
+        '--converter', $converter,
+        '--result', $resultFile,
+    ];
+    if ($quality !== '') {
+        $args[] = '--quality';
+        $args[] = $quality;
+    }
+
+    [$code, $output] = gc_conv_command($args, 3600, $log, ['GC_CONVERTER_BACKEND' => $config['backend']]);
+    if ($code !== 0) {
+        $tail = trim((string) $output);
+        if (mb_strlen($tail) > 500) {
+            $tail = mb_substr($tail, -500);
+        }
+        throw new RuntimeException('Python converter завершился с кодом ' . $code . ($tail !== '' ? ': ' . $tail : '.'));
+    }
+
+    $raw = is_file($resultFile) ? @file_get_contents($resultFile) : false;
+    $payload = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($payload) || !isset($payload['output'])) {
+        throw new RuntimeException('Python-конвертер не вернул результат.');
+    }
+    $path = $dir . '/' . basename((string) $payload['output']);
+    if (!is_file($path) || filesize($path) === 0) {
+        throw new RuntimeException('Python-конвертер не создал файл.');
+    }
+
+    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+    return [
+        'output' => basename($path),
+        'output_name' => gc_conv_output_name((string) pathinfo($input, PATHINFO_FILENAME), $extension),
+        'output_size' => (int) filesize($path),
+    ];
+}
+
 /** PHP CLI binary, not php-fpm: the worker must be started as a script. */
 function gc_conv_php_binary(): string
 {
@@ -285,6 +381,109 @@ function gc_conv_catalog(): array
     return $catalog;
 }
 
+/**
+ * The full reference catalogue (166 inputs / 3023 pairs), generated from the
+ * old Transmute converter. It is deliberately separate from the small native
+ * fallback catalogue above: every pair names the Python converter that owns it.
+ */
+function gc_conv_full_data(): array
+{
+    static $data = null;
+    if ($data !== null) {
+        return $data;
+    }
+
+    $data = ['inputs' => [], 'pairs' => [], 'by_input' => [], 'by_pair' => []];
+    $file = __DIR__ . '/converter_catalog.json';
+    $raw = is_file($file) ? @file_get_contents($file) : false;
+    $json = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($json) || !isset($json['conversions']) || !is_array($json['conversions'])) {
+        return $data;
+    }
+
+    foreach ($json['conversions'] as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $input = gc_conv_norm_ext((string) ($row['input_format'] ?? ''));
+        $output = gc_conv_norm_ext((string) ($row['output_format'] ?? ''));
+        $converter = (string) ($row['converter_name'] ?? '');
+        if ($input === '' || $output === '' || $converter === '') {
+            continue;
+        }
+        $pair = ['input' => $input, 'output' => $output, 'converter' => $converter];
+        if (!isset($data['by_pair'][$input . "\0" . $output])) {
+            $data['by_pair'][$input . "\0" . $output] = $pair;
+        }
+        if (!isset($data['by_input'][$input])) {
+            $data['by_input'][$input] = [];
+            $data['inputs'][$input] = true;
+        }
+        // Keep the first converter for an output; the reference registry uses
+        // the same first-match behaviour for most pairs.
+        if (!isset($data['by_input'][$input][$output])) {
+            $data['by_input'][$input][$output] = $pair;
+        }
+        $data['pairs'][] = $pair;
+    }
+
+    ksort($data['by_input']);
+    ksort($data['inputs']);
+    return $data;
+}
+
+function gc_conv_norm_ext(string $ext): string
+{
+    $ext = strtolower(trim($ext, " \t\n\r\0\x0B."));
+    return match ($ext) {
+        'jpg' => 'jpeg',
+        'tif' => 'tiff',
+        'htm' => 'html',
+        default => $ext,
+    };
+}
+
+function gc_conv_full_pair(string $input, string $output): ?array
+{
+    $data = gc_conv_full_data();
+    $input = gc_conv_norm_ext($input);
+    $output = gc_conv_norm_ext($output);
+    return $data['by_pair'][$input . "\0" . $output] ?? null;
+}
+
+function gc_conv_full_input_count(): int
+{
+    return count(gc_conv_full_data()['inputs']);
+}
+
+function gc_conv_full_pair_count(): int
+{
+    return count(gc_conv_full_data()['pairs']);
+}
+
+/** Output file extension; PDF subtypes all produce a .pdf file. */
+function gc_conv_file_format(string $format): string
+{
+    return str_starts_with($format, 'pdf/') ? 'pdf' : $format;
+}
+
+/** Quality choices for one reference pair. */
+function gc_conv_pair_quality(array $pair): ?string
+{
+    $converter = $pair['converter'] ?? '';
+    $output = (string) ($pair['output'] ?? '');
+    if (str_starts_with($output, 'pdf/')) {
+        return 'pdf';
+    }
+    if ($converter === 'PillowConverter' || $converter === 'VectorConverter') {
+        return 'image';
+    }
+    if ($converter === 'FFmpegConverter') {
+        return 'media';
+    }
+    return null;
+}
+
 /** @return array{group:string,kind:string,label:string,outputs:array,default:string}|null */
 function gc_conv_group_for_ext(string $ext): ?array
 {
@@ -301,6 +500,22 @@ function gc_conv_group_for_ext(string $ext): ?array
 /** Output list with quality choices, ready for JSON. */
 function gc_conv_format_payload(string $ext): array
 {
+    $ext = gc_conv_norm_ext($ext);
+    $data = gc_conv_full_data();
+    if (isset($data['by_input'][$ext])) {
+        $formats = [];
+        foreach ($data['by_input'][$ext] as $value => $pair) {
+            $qualityType = gc_conv_pair_quality($pair);
+            $formats[] = [
+                'value' => $value,
+                'label' => gc_conv_format_label($value),
+                'quality' => gc_conv_quality_choices($qualityType),
+                'converter' => $pair['converter'],
+            ];
+        }
+        return $formats;
+    }
+
     $group = gc_conv_group_for_ext($ext);
     if ($group === null) {
         return [];
@@ -316,6 +531,20 @@ function gc_conv_format_payload(string $ext): array
     }
 
     return $formats;
+}
+
+function gc_conv_format_label(string $format): string
+{
+    $special = [
+        'pdf/a' => 'PDF/A',
+        'pdf/e' => 'PDF/E',
+        'pdf/ua' => 'PDF/UA',
+        'pdf/vt' => 'PDF/VT',
+        'pdf/x' => 'PDF/X',
+        'jpeg' => 'JPG',
+        'tiff' => 'TIFF',
+    ];
+    return $special[$format] ?? strtoupper($format);
 }
 
 function gc_conv_quality_choices(?string $type): array
@@ -342,6 +571,19 @@ function gc_conv_quality_choices(?string $type): array
 
 function gc_conv_default_format(string $ext): ?string
 {
+    $ext = gc_conv_norm_ext($ext);
+    $data = gc_conv_full_data();
+    if (isset($data['by_input'][$ext])) {
+        $outputs = $data['by_input'][$ext];
+        foreach (['webp', 'pdf', 'png', 'mp3', 'mp4', 'jpeg'] as $preferred) {
+            if (isset($outputs[$preferred])) {
+                return $preferred;
+            }
+        }
+        $keys = array_keys($outputs);
+        return $keys[0] ?? null;
+    }
+
     $group = gc_conv_group_for_ext($ext);
     if ($group === null) {
         return null;
@@ -510,8 +752,10 @@ function gc_conv_job_create(int $userId, array $file): array
         throw new RuntimeException('У файла нет расширения — формат не определить.');
     }
 
+    $norm = gc_conv_norm_ext($ext);
+    $full = gc_conv_full_data();
     $group = gc_conv_group_for_ext($ext);
-    if ($group === null) {
+    if (!isset($full['inputs'][$norm]) && $group === null) {
         throw new RuntimeException('Формат «' . $ext . '» не поддерживается конвертером.');
     }
 
@@ -549,7 +793,7 @@ function gc_conv_job_create(int $userId, array $file): array
         'original' => $original,
         'input' => $inputName,
         'input_ext' => $ext,
-        'kind' => $group['group'],
+        'kind' => $group['group'] ?? 'python',
         'size' => $size,
         'status' => 'uploaded',
         'format' => null,

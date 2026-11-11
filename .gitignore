@@ -16,7 +16,9 @@ Thumbs.db
 .DS_Store
 *.log
 
-# Python bytecode of the hooks
+# Python bytecode and the converter virtualenv
 __pycache__/
 *.pyc
+converter_py/.venv/
+converter_py/venv/
 CLAUDE.md

@@ -45,17 +45,19 @@ function gc_api_job(int $userId, string $id): array
 if (($_GET['action'] ?? '') === 'health') {
     $tools = gc_conv_tools();
     $catalog = gc_conv_catalog();
-    $formats = 0;
     $groups = [];
     foreach ($catalog as $key => $group) {
-        $count = count($group['outputs']);
-        $formats += $count;
-        $groups[$key] = $count;
+        $groups[$key] = count($group['outputs']);
     }
+    $inputs = gc_conv_full_input_count();
+    $pairs = gc_conv_full_pair_count();
     gc_api_out([
-        'ok' => $formats > 0,
-        'formats' => $formats,
+        'ok' => $pairs > 0,
+        'formats' => $inputs,
+        'inputs' => $inputs,
+        'pairs' => $pairs,
         'groups' => $groups,
+        'python' => gc_conv_python_config() !== null,
         'gd' => function_exists('imagecreatetruecolor'),
         'ffmpeg' => $tools['ffmpeg'] !== null,
         'exec' => function_exists('exec'),
@@ -129,15 +131,20 @@ try {
                 gc_api_fail('Эта задача уже выполняется.', 409);
             }
 
-            $format = strtolower((string) ($_POST['format'] ?? ''));
-            $group = gc_conv_group_for_ext((string) $job['input_ext']);
-            if ($group === null || !isset($group['outputs'][$format])) {
+            $inputExt = gc_conv_norm_ext((string) $job['input_ext']);
+            $format = gc_conv_norm_ext((string) ($_POST['format'] ?? ''));
+            $pair = gc_conv_full_pair($inputExt, $format);
+            $group = gc_conv_group_for_ext($inputExt);
+            $native = $group !== null && isset($group['outputs'][$format]);
+            if ($pair === null && !$native) {
                 gc_api_fail('Этот формат недоступен для файла.');
             }
 
-            $spec = $group['outputs'][$format];
             $quality = (string) ($_POST['quality'] ?? '');
-            $choices = gc_conv_quality_choices($spec['quality'] ?? null);
+            $qualityType = $pair !== null
+                ? gc_conv_pair_quality($pair)
+                : (($group['outputs'][$format]['quality'] ?? null));
+            $choices = gc_conv_quality_choices($qualityType);
             if ($choices !== []) {
                 $allowed = array_column($choices, 'value');
                 if (!in_array($quality, $allowed, true)) {

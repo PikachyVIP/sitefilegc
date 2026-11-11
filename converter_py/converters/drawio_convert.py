@@ -1,0 +1,190 @@
+import os
+import subprocess  # nosec B404
+import sys
+from pathlib import Path
+from typing import Optional
+
+from core import validate_safe_path
+
+from .converter_interface import ConverterInterface
+
+class DrawioConverter(ConverterInterface):
+    supported_input_formats = {
+        'drawio'
+    }
+    supported_output_formats = {
+        'png',
+        'pdf',
+        'svg',
+        'jpeg',
+    }
+    formats_with_qualities = {
+        'jpeg',
+    }
+    drawio_paths = {
+        'darwin': '/Applications/draw.io.app/Contents/MacOS/draw.io',
+        'linux': '/opt/drawio/drawio',
+        'win32': 'C:\\Program Files\\draw.io\\draw.io.exe',
+    }
+    drawio_path = drawio_paths.get(sys.platform, 'drawio')
+    
+    def __init__(self, input_file: str, output_dir: str, input_type: str, output_type: str):
+        """
+        Initialize Drawio converter.
+        
+        Args:
+            input_file: Path to the input draw.io file
+            output_dir: Directory where the converted file will be saved
+            input_type: Input file format (must be 'drawio')
+            output_type: Output file format (e.g., 'png', 'pdf', 'svg', 'jpeg')
+        """
+        super().__init__(input_file, output_dir, input_type, output_type)
+    
+    @classmethod
+    def can_register(cls) -> bool:
+        """
+        Check if the Draw.io converter can be registered.
+        
+        Returns:
+            True if Draw.io is available, False otherwise.
+        """
+        try:
+            # Subprocess is safe here because the command is constructed without
+            # user input.
+            subprocess.run([cls.drawio_path, '--version', '--no-sandbox'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # nosec B603
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    def can_convert(self) -> bool:
+        """
+        Check if the input file can be converted to the output format.
+        
+        Returns:
+            True if conversion is possible, False otherwise
+        """
+        input_fmt = self.input_type.lower()
+        output_fmt = self.output_type.lower()
+        
+        # Check if formats are supported
+        if input_fmt not in self.supported_input_formats or output_fmt not in self.supported_output_formats:
+            return False
+        
+        # Can only convert FROM drawio to other formats
+        if input_fmt != 'drawio':
+            return False
+            
+        # Cannot convert drawio to drawio
+        if output_fmt == 'drawio':
+            return False
+        
+        return True
+
+    @classmethod
+    def get_formats_compatible_with(cls, format_type: str) -> set:
+        """
+        Get the set of compatible formats for conversion.
+        
+        Args:
+            format_type: The input format to check compatibility for.
+        Returns:
+            Set of compatible formats.
+        """
+        base_formats = super().get_formats_compatible_with(format_type)
+        # Can convert FROM drawio but not TO drawio (export only)
+        base_formats.discard('drawio')
+        return base_formats
+    
+    def convert(self, overwrite: bool = True, quality: Optional[str] = None) -> list[str]:
+        """
+        Convert the draw.io file to the output format using Draw.io CLI directly.
+        
+        Args:
+            overwrite: Whether to overwrite existing output file (default: True)
+            quality: Quality setting (not used for drawio conversion)
+        
+        Returns:
+            List containing the path to the converted output file
+            
+        Raises:
+            FileNotFoundError: If input file doesn't exist or Draw.io not installed
+            ValueError: If the conversion is not supported
+            RuntimeError: If conversion fails
+        """
+        if not self.can_convert():
+            raise ValueError(f"Conversion from {self.input_type} to {self.output_type} is not supported.")
+        
+        # Check if input file exists
+        if not os.path.isfile(self.input_file):
+            raise FileNotFoundError(f"Input file not found: {self.input_file}")
+        
+        # Generate output filename
+        input_filename = Path(self.input_file).stem
+        output_file = os.path.join(self.output_dir, f"{input_filename}.{self.output_type}")
+        
+        # Check if output file exists and overwrite is False
+        if not overwrite and os.path.exists(output_file):
+            return [output_file]
+        
+        try:
+            # Validate input file path
+            validate_safe_path(self.input_file)
+            validate_safe_path(output_file)
+
+            # Build the Draw.io CLI command
+            # -x: export mode
+            # -p: page index (0 for first page)
+            # -o: output file
+            # --transparent: transparent background for PNG
+            # --no-sandbox: required for running in containers/non-root environments
+            cmd = [
+                self.drawio_path,
+                '-x',
+                self.input_file,
+                '-p', '0',  # Export first page
+                '-o', output_file,
+                '--no-sandbox',  # Required for containerized environments
+            ]
+
+            # Add quality for JPEG format
+            if self.output_type.lower() == 'jpeg':
+                cmd.append('--quality')
+                if quality == 'high':
+                    cmd.append('90')
+                elif quality == 'low':
+                    cmd.append('60')
+                else:  # Default to medium quality
+                    cmd.append('80')
+            
+            # Add transparency for PNG format
+            if self.output_type.lower() == 'png':
+                cmd.append('--transparent')
+            
+            # Run the conversion
+            # Subprocess is safe here because the input file path is validated
+            # and the command is constructed without user input.
+            result = subprocess.run( # nosec B603
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30  # 30 second timeout to prevent hanging
+            )
+            
+            # Verify output file was created
+            if not os.path.exists(output_file):
+                raise RuntimeError(
+                    f"Output file was not created: {output_file}\n"
+                    f"Command: {' '.join(cmd)}\n"
+                    f"Stdout: {result.stdout}\n"
+                    f"Stderr: {result.stderr}"
+                )
+            
+            return [output_file]
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Drawio conversion failed: {e.stderr or e.stdout or str(e)}"
+            raise RuntimeError(error_msg)
+        except Exception as e:
+            error_msg = f"Drawio conversion failed: {str(e)}"
+            raise RuntimeError(error_msg)

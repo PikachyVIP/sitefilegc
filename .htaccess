@@ -11,11 +11,11 @@ DirectoryIndex index.php
     Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
 </IfModule>
 
-<FilesMatch "^(schema\.sql|README\.md|CLAUDE\.md|.*\.ini|db\.php|session\.php|bootstrap\.php|layout\.php|converter_lib\.php|converter_engine\.php|converter_worker\.php)$">
+<FilesMatch "^(schema\.sql|README\.md|CLAUDE\.md|.*\.ini|db\.php|session\.php|bootstrap\.php|layout\.php|converter_lib\.php|converter_engine\.php|converter_worker\.php|converter_bridge\.py|converter_catalog\.json)$">
     Require all denied
 </FilesMatch>
 
-RedirectMatch 404 "(?i)/(?:uploads|updates|docs|\.claude|\.githooks)(?:/|$)"
+RedirectMatch 404 "(?i)/(?:uploads|updates|docs|converter_py|\.claude|\.githooks)(?:/|$)"
 
 <IfModule mod_deflate.c>
     AddOutputFilterByType DEFLATE text/html text/css application/javascript image/svg+xml

@@ -2,8 +2,9 @@
 declare(strict_types=1);
 
 /**
- * GC Convert tab — native PHP page. Conversion itself runs on this server via
- * converter_engine.php; the browser only talks to converter_api.php.
+ * GC Convert tab — PHP page. The browser only talks to converter_api.php;
+ * conversion runs locally through converter_engine.php (Python bridge or the
+ * native CLI fallback).
  */
 
 require_once __DIR__ . '/layout.php';
@@ -11,28 +12,23 @@ require_once __DIR__ . '/converter_lib.php';
 
 $user = gc_require_login();
 $catalog = gc_conv_catalog();
-$tools = gc_conv_tools();
 
-$formatCount = 0;
+$full = gc_conv_full_data();
+$formatCount = count($full['inputs']);
+$pairCount = count($full['pairs']);
 $accept = [];
+foreach (array_keys($full['inputs']) as $ext) {
+    if (!str_contains($ext, '/')) {
+        $accept[] = '.' . $ext;
+    }
+}
 foreach ($catalog as $group) {
-    $formatCount += count($group['outputs']);
     foreach (array_keys($group['inputs']) as $ext) {
         $accept[] = '.' . $ext;
     }
 }
 $accept = array_values(array_unique($accept));
 sort($accept);
-
-$available = [];
-if (function_exists('imagecreatetruecolor')) {
-    $available[] = 'изображения';
-}
-foreach (['ffmpeg' => 'аудио и видео', 'soffice' => 'документы', 'gs' => 'PDF', 'pdftoppm' => 'PDF → изображения', 'pdftotext' => 'PDF → текст', 'tesseract' => 'OCR', 'pandoc' => 'Markdown', 'ebook-convert' => 'книги'] as $tool => $label) {
-    if ($tools[$tool] !== null) {
-        $available[] = $label;
-    }
-}
 
 $payload = [
     'csrf' => gc_csrf_token(),
@@ -57,7 +53,8 @@ gc_head('Конвертер', 'converter');
             <p class="gc_conv_lead">Изображения, документы, аудио и видео. Файл остаётся на нашем сервере: загрузите, выберите формат и скачайте результат.</p>
         </div>
         <div class="gc_conv_facts">
-            <span>форматов: <?= (int) $formatCount ?></span>
+            <span><?= (int) $formatCount ?> форматов</span>
+            <span><?= (int) $pairCount ?> пар конвертации</span>
             <span>до <?= gc_h(gc_conv_human_size(gc_conv_max_upload())) ?></span>
             <span>хранение 24 часа</span>
         </div>
@@ -78,9 +75,7 @@ gc_head('Конвертер', 'converter');
                 <input type="file" id="gcConvInput" multiple accept="<?= gc_h(implode(',', $accept)) ?>" hidden>
             </div>
 
-            <?php if ($available !== []) { ?>
-                <p class="gc_conv_tools">Доступно: <?= gc_h(implode(', ', $available)) ?>.</p>
-            <?php } ?>
+            <p class="gc_conv_tools">Изображения, документы, таблицы, презентации, PDF, аудио, видео, архивы и книги.</p>
 
             <div class="gc_conv_notice" id="gcConvNotice" role="status" hidden></div>
 

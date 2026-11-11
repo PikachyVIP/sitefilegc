@@ -109,30 +109,44 @@ function gc_conv_run_job(string $dir): ?array
 /** @return array{output:string,output_name:string,output_size:int} */
 function gc_conv_execute(array $job, string $dir, string $log): array
 {
-    $ext = strtolower((string) $job['input_ext']);
+    $ext = gc_conv_norm_ext((string) $job['input_ext']);
     $group = gc_conv_group_for_ext($ext);
-    if ($group === null) {
-        throw new RuntimeException('Формат входа больше не поддерживается.');
+    $format = gc_conv_norm_ext((string) ($job['format'] ?? ''));
+    $pair = gc_conv_full_pair($ext, $format);
+    $nativeSupported = $group !== null && isset($group['outputs'][$format]);
+    if ($pair === null && !$nativeSupported) {
+        throw new RuntimeException('Это преобразование не поддерживается для файла.');
     }
 
-    $format = strtolower((string) ($job['format'] ?? ''));
-    if (!isset($group['outputs'][$format])) {
-        throw new RuntimeException('Формат результата не поддерживается для этого файла.');
-    }
-
-    $spec = $group['outputs'][$format];
-    $run = $spec['run'] ?? $group['group'];
     $input = $dir . '/' . $job['input'];
     if (!is_file($input)) {
         throw new RuntimeException('Входной файл не найден.');
     }
 
-    $output = $dir . '/output.' . $format;
+    $quality = (string) ($job['quality'] ?? '');
+    $pythonError = null;
+
+    if ($pair !== null) {
+        try {
+            $result = gc_conv_do_python($input, $ext, $format, (string) $pair['converter'], $quality, $dir, $log);
+            $result['output_name'] = gc_conv_output_name((string) $job['original'], (string) pathinfo($result['output'], PATHINFO_EXTENSION));
+            return $result;
+        } catch (Throwable $error) {
+            $pythonError = $error;
+        }
+    }
+
+    if (!$nativeSupported) {
+        throw new RuntimeException($pythonError?->getMessage() ?? 'Нет доступного конвертера.');
+    }
+
+    $spec = $group['outputs'][$format];
+    $run = $spec['run'] ?? $group['group'];
+    $fileFormat = gc_conv_file_format($format);
+    $output = $dir . '/output.' . $fileFormat;
     if (is_file($output)) {
         @unlink($output);
     }
-
-    $quality = (string) ($job['quality'] ?? '');
 
     match ($run) {
         'image' => gc_conv_do_image($input, $ext, $output, $format, $quality, $log),
@@ -150,8 +164,8 @@ function gc_conv_execute(array $job, string $dir, string $log): array
     }
 
     return [
-        'output' => 'output.' . $format,
-        'output_name' => gc_conv_output_name((string) $job['original'], $format),
+        'output' => 'output.' . $fileFormat,
+        'output_name' => gc_conv_output_name((string) $job['original'], $fileFormat),
         'output_size' => (int) filesize($output),
     ];
 }

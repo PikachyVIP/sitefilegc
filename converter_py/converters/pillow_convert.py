@@ -1,0 +1,310 @@
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+from io import BytesIO
+from PIL import Image
+from pillow_heif import HeifImagePlugin
+import pillow_avif  # noqa: F401 — registers AVIF plugin on import
+import pillow_jxl   # noqa: F401 — registers JPEG XL plugin on import
+from .converter_interface import ConverterInterface
+
+try:
+    if sys.platform == 'darwin':
+        # Homebrew installs Cairo to paths not searched by default.
+        # Setting DYLD_LIBRARY_PATH before the first ctypes load is enough.
+        _brew_lib = '/opt/homebrew/lib' if os.path.exists('/opt/homebrew') else '/usr/local/lib'
+        os.environ.setdefault('DYLD_LIBRARY_PATH', '')
+        if _brew_lib not in os.environ['DYLD_LIBRARY_PATH']:
+            os.environ['DYLD_LIBRARY_PATH'] = f"{_brew_lib}:{os.environ['DYLD_LIBRARY_PATH']}"
+    import cairosvg
+    _CAIROSVG_AVAILABLE = True
+except (ImportError, OSError):
+    _CAIROSVG_AVAILABLE = False
+
+import shutil
+_GHOSTSCRIPT_AVAILABLE = shutil.which('gs') is not None or shutil.which('gswin32c') is not None
+
+
+class PillowConverter(ConverterInterface):
+    supported_input_formats: set = {
+        'jpeg',
+        'png',
+        'gif',
+        'bmp',
+        'tiff',
+        'webp',
+        'ico',
+        'ppm',
+        'pgm',
+        'pbm',
+        'pcx',
+        'heif',
+        'heic',
+        'svg',
+        'tga',
+        'jp2',
+        'sgi',
+        'icns',
+        'dds',
+        'psd',  # read-only
+        'blp',
+        'cur',  # read-only
+        'dcx',
+        'fli',
+        'flc',
+        'xbm',
+        'xpm',  # read-only
+        'msp',
+        'qoi',
+        'dib',
+        'avif',
+        'jxl',
+        'eps',
+        'apng',
+        'mpo',
+        'pnm',
+        'pfm',
+    }
+    supported_output_formats: set = {
+        'jpeg',
+        'png',
+        'gif',
+        'bmp',
+        'tiff',
+        'webp',
+        'ico',
+        'ppm',
+        'pgm',
+        'pbm',
+        'pcx',
+        'heif',
+        'heic',
+        'tga',
+        'jp2',
+        'sgi',
+        'pdf',
+        'icns',
+        'dds',
+        'blp',
+        'xbm',
+        'msp',
+        'qoi',
+        'dib',
+        'avif',
+        'jxl',
+        'eps',
+        'apng',
+        'mpo',
+        'pnm',
+        'pfm',
+    }
+    formats_with_qualities = {
+        'jpeg',
+        'webp',
+        'avif',
+        'jxl',
+        'jp2',
+        'heif',
+        'heic',
+    }
+    
+    def __init__(self, input_file: str, output_dir: str, input_type: str, output_type: str):
+        """
+        Initialize Pillow converter.
+        
+        Args:
+            input_file: Path to the input image file
+            output_dir: Directory where the converted file will be saved
+            input_type: Input file format (e.g., 'jpg', 'png', 'bmp')
+            output_type: Output file format (e.g., 'jpg', 'png', 'bmp')
+        """
+        super().__init__(input_file, output_dir, input_type, output_type)
+        HeifImagePlugin.register_heif_opener()
+    
+    def can_convert(self) -> bool:
+        """
+        Check if the input file can be converted to the output format.
+        
+        Returns:
+            True if conversion is possible, False otherwise
+        """
+        input_fmt = self.input_type.lower()
+        output_fmt = self.output_type.lower()
+        
+        # Check if formats are supported
+        if input_fmt not in self.supported_input_formats or output_fmt not in self.supported_output_formats:
+            return False
+        
+        # All supported image format conversions are valid with Pillow
+        return True
+
+    @classmethod
+    def get_formats_compatible_with(cls, format_type: str) -> set:
+        """
+        Get the set of compatible formats for conversion.
+        
+        Args:
+            format_type: The input format to check compatibility for.
+        Returns:
+            Set of compatible formats.
+        """
+        base_formats = super().get_formats_compatible_with(format_type)
+        # Can convert FROM SVG but not TO SVG (rasterization only)
+        base_formats.discard('svg')
+        # Read-only formats cannot be output targets
+        for ro_fmt in ('psd', 'cur', 'xpm'):
+            base_formats.discard(ro_fmt)
+        # SVG input requires cairosvg
+        if format_type.lower() == 'svg' and not _CAIROSVG_AVAILABLE:
+            return set()
+        # EPS input requires Ghostscript
+        if format_type.lower() == 'eps' and not _GHOSTSCRIPT_AVAILABLE:
+            return set()
+        # EPS output requires Ghostscript (for reading back)
+        if not _GHOSTSCRIPT_AVAILABLE:
+            base_formats.discard('eps')
+        return base_formats
+
+    
+    def convert(self, overwrite: bool = True, quality: Optional[str] = None) -> list[str]:
+        """
+        Convert the input image file to the output format using Pillow.
+        
+        Args:
+            overwrite: Whether to overwrite existing output file (default: True)
+            quality: Quality setting for lossy formats ('high', 'medium', 'low')
+        
+        Returns:
+            List containing the path to the converted output file
+            
+        Raises:
+            FileNotFoundError: If input file doesn't exist
+            ValueError: If the conversion is not supported
+            RuntimeError: If image conversion fails
+        """
+        # Validate conversion is possible
+        if not self.can_convert():
+            raise ValueError(
+                f"Cannot convert {self.input_type} to {self.output_type}. "
+                f"Unsupported image format."
+            )
+        
+        # Check if input file exists
+        if not os.path.isfile(self.input_file):
+            raise FileNotFoundError(f"Input file not found: {self.input_file}")
+        
+        # Generate output filename
+        input_filename = Path(self.input_file).stem
+        output_file = os.path.join(self.output_dir, f"{input_filename}.{self.output_type}")
+        
+        # Check if output file exists and overwrite is False
+        if not overwrite and os.path.exists(output_file):
+            return [output_file]
+        
+        try:
+            # Handle SVG input specially
+            input_fmt = self.input_type.lower()
+            if input_fmt == 'svg':
+                if not _CAIROSVG_AVAILABLE:
+                    raise RuntimeError(
+                        "cairosvg is required for SVG conversion but could not be loaded. "
+                        "Install Cairo (e.g. `brew install cairo`) and cairosvg (`pip install cairosvg`)."
+                    )
+                # Convert SVG to PNG with transparency using cairosvg
+                png_data = cairosvg.svg2png(url=self.input_file)
+                img = Image.open(BytesIO(png_data))
+            elif input_fmt == 'eps':
+                if not _GHOSTSCRIPT_AVAILABLE:
+                    raise RuntimeError(
+                        "Ghostscript is required for EPS conversion but could not be found. "
+                        "Install Ghostscript (e.g. `brew install ghostscript` or `apt-get install ghostscript`)."
+                    )
+                img = Image.open(self.input_file)
+            else:
+                # Open the image
+                img = Image.open(self.input_file)
+
+            # PSD files can expose broken sequence state to some encoders
+            # (notably AVIF). Saving a detached raster copy avoids frame seeks.
+            if input_fmt == 'psd':
+                img = img.copy()
+            
+            # Handle transparency for formats that don't support alpha
+            output_fmt = self.output_type.lower()
+
+            # Normalize mode 1 (binary) — most encoders need at least L
+            if img.mode == '1' and output_fmt not in ('pbm', 'msp', 'xbm'):
+                img = img.convert('L')
+
+            # BLP is a game texture format — its encoder is extremely slow on
+            # large images.  Cap at 512×512 (typical max texture size) and
+            # convert to palette mode which BLP requires.
+            if output_fmt == 'blp':
+                max_blp = 512
+                if img.width > max_blp or img.height > max_blp:
+                    img.thumbnail((max_blp, max_blp), Image.LANCZOS)
+                if img.mode != 'P':
+                    img = img.quantize(colors=256, method=Image.Quantize.FASTOCTREE)
+
+            # Normalize mode P (palette) for formats that can't write it
+            if img.mode == 'P':
+                if output_fmt == 'pbm':
+                    img = img.convert('1')
+                elif output_fmt == 'pgm':
+                    img = img.convert('L')
+                elif output_fmt in ('dds', 'jp2', 'jxl', 'qoi'):
+                    img = img.convert('RGBA')
+
+            _no_alpha_formats = {'jpg', 'jpeg', 'pdf', 'sgi', 'bmp', 'ppm', 'pcx', 'gif', 'tga',
+                                    'dib', 'msp', 'xbm', 'fli', 'flc', 'dcx', 'eps', 'mpo',
+                                    'pnm', 'pfm'}
+            if output_fmt in _no_alpha_formats and img.mode in ['RGBA', 'LA', 'P']:
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                if img.mode in ['RGBA', 'LA']:
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'LA':
+                        img = img.convert('RGBA')
+                    background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
+                    img = background
+
+            # MSP and XBM only support 1-bit pixels
+            if output_fmt in ('msp', 'xbm') and img.mode != '1':
+                img = img.convert('1')
+
+            # QOI only supports RGB and RGBA
+            if output_fmt == 'qoi' and img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGB')
+
+            # Set quality parameters
+            save_kwargs = {}
+            if output_fmt in ['jpg', 'jpeg', 'webp', 'avif', 'jxl', 'heif', 'heic']:
+                if quality == 'high':
+                    save_kwargs['quality'] = 95
+                elif quality == 'low':
+                    save_kwargs['quality'] = 60
+                else:  # medium or None
+                    save_kwargs['quality'] = 85
+
+            # JPEG 2000 uses quality_layers instead of quality
+            if output_fmt == 'jp2':
+                if quality == 'high':
+                    save_kwargs['quality_layers'] = [100]
+                elif quality == 'low':
+                    save_kwargs['quality_layers'] = [30]
+                else:
+                    save_kwargs['quality_layers'] = [80]
+
+            # For PNG, handle optimization
+            if output_fmt == 'png':
+                save_kwargs['optimize'] = True
+
+            # Save the image
+            img.save(output_file, **save_kwargs)
+            
+            return [output_file]
+            
+        except Exception as e:
+            error_msg = f"Image conversion failed: {str(e)}"
+            raise RuntimeError(error_msg)

@@ -1,0 +1,502 @@
+import os
+import re
+import sqlite3
+import mimetypes
+import hashlib
+import magic
+from defusedxml import ElementTree as DefusedET
+
+from typing import TYPE_CHECKING
+from fastapi import HTTPException
+from pathlib import Path
+
+if TYPE_CHECKING:
+    from db import FileDB
+    
+from core.media_types import media_type_extensions
+from core.settings import get_settings
+
+
+def compute_sha256_checksum(file_path: str | Path, chunk_size: int = 1024 * 1024) -> str:
+    """Compute a SHA-256 checksum without loading the full file into memory.
+
+    Args:
+        file_path: Path to the file to hash
+        chunk_size: Number of bytes to read per iteration
+
+    Returns:
+        Hex-encoded SHA-256 digest
+    """
+    hasher = hashlib.sha256()
+    with Path(file_path).open("rb") as file_handle:
+        while chunk := file_handle.read(chunk_size):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def assign_orphaned_rows_to_admin(
+    conn: sqlite3.Connection,
+    table_name: str,
+    user_table_name: str = "USERS",
+) -> None:
+    """Assign rows with NULL user_id to the first admin user.
+
+    During migration from a pre-auth version of the database, existing rows
+    will have no user_id.  This finds the earliest admin account and claims
+    those orphaned rows so they are not invisible after the upgrade.
+
+    Args:
+        conn: An open SQLite connection.
+        table_name: The (already-validated) table name to update.
+        user_table_name: The name of the users table to query for the
+            first admin.  Defaults to ``"USERS"``.
+    """
+    # Check if there are any orphaned rows first to avoid unnecessary work
+    cursor = conn.execute(
+        f"SELECT 1 FROM {table_name} WHERE user_id IS NULL LIMIT 1"  # nosec B608
+    )
+    if cursor.fetchone() is None:
+        return
+
+    # Find the first admin user by rowid
+    cursor = conn.execute(
+        f"SELECT uuid FROM {user_table_name} WHERE role = 'admin' ORDER BY rowid LIMIT 1"  # nosec B608
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return
+
+    admin_uuid = row[0]
+    with conn:
+        conn.execute(
+            f"UPDATE {table_name} SET user_id = ? WHERE user_id IS NULL",  # nosec B608
+            (admin_uuid,)
+        )
+
+
+def migrate_table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+    expected_columns: dict[str, str],
+) -> None:
+    """Add any missing columns to an existing SQLite table.
+
+    Compares the columns currently present in *table_name* against
+    *expected_columns* and issues ``ALTER TABLE … ADD COLUMN`` for each
+    one that is absent.  This allows older databases to be transparently
+    upgraded when new columns are introduced.
+
+    Args:
+        conn: An open SQLite connection.
+        table_name: The (already-validated) table name to inspect.
+        expected_columns: A mapping of ``column_name`` to its full SQL
+            column definition (e.g. ``"INTEGER NOT NULL DEFAULT 1"``).
+    """
+    cursor = conn.execute(f"PRAGMA table_info({table_name})")  # nosec B608
+    existing = {row[1] for row in cursor.fetchall()}
+    with conn:
+        for col_name, col_def in expected_columns.items():
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}"  # nosec B608
+                )
+
+
+def validate_sql_identifier(identifier: str) -> str:
+    """
+    Validate and return a SQL identifier (table/column name) to prevent SQL injection.
+    
+    Args:
+        identifier: The identifier to validate
+        
+    Returns:
+        The validated identifier
+        
+    Raises:
+        ValueError: If the identifier contains invalid characters
+    """
+    if not identifier:
+        raise ValueError("SQL identifier cannot be empty")
+    
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', identifier):
+        raise ValueError(
+            f"Invalid SQL identifier '{identifier}'. "
+            "Must start with a letter or underscore and contain only alphanumeric characters and underscores."
+        )
+    
+    if len(identifier) > 64:
+        raise ValueError(f"SQL identifier '{identifier}' is too long (max 64 characters)")
+    
+    return identifier
+
+
+def detect_pdf_type(file_path: Path) -> str:
+    """
+    Detect the specific PDF type (e.g. PDF/A, PDF/X) by inspecting
+    XMP metadata with PyMuPDF.
+
+    PDF subtypes declare themselves in XMP metadata using standard
+    namespaces (pdfaid for PDF/A, pdfxid for PDF/X, etc.).
+
+    Args:
+        file_path: Path to the PDF file to analyze
+
+    Returns:
+        A string indicating the PDF type (e.g. "pdf/a", "pdf/x"), or "pdf" if no specific type is detected
+    """
+    import fitz
+
+    try:
+        doc = fitz.open(str(file_path))
+    except Exception as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
+
+    try:
+        if not doc.is_pdf:
+            raise ValueError(f"File is not a PDF: {file_path}")
+
+        return _detect_pdf_subtype_from_xmp(doc.get_xml_metadata() or "")
+    finally:
+        doc.close()
+
+
+def _detect_pdf_subtype_from_xmp(xmp: str) -> str:
+    """Classify a PDF subtype from parsed XMP metadata values."""
+    if not xmp.strip():
+        return "pdf"
+
+    try:
+        root = DefusedET.fromstring(xmp)
+    except DefusedET.ParseError:
+        return "pdf"
+
+    def has_text(*local_names: str) -> bool:
+        wanted = set(local_names)
+        for element in root.iter():
+            tag = element.tag
+            if not isinstance(tag, str):
+                continue
+            local_name = tag.rsplit('}', 1)[-1].rsplit(':', 1)[-1]
+            if local_name in wanted and (element.text or '').strip():
+                return True
+        return False
+
+    # More-specific subtypes must be checked before more general ones.
+    if has_text('GTS_PDFVTVersion'):
+        return 'pdf/vt'
+    if has_text('part') and has_text('conformance'):
+        return 'pdf/a'
+    if has_text('part'):
+        # PDF/UA uses pdfuaid:part, while PDF/A additionally requires a
+        # conformance marker.
+        for element in root.iter():
+            tag = element.tag
+            if not isinstance(tag, str):
+                continue
+            if tag.rsplit('}', 1)[-1].rsplit(':', 1)[-1] != 'part':
+                continue
+            namespace = tag[1:].split('}', 1)[0] if tag.startswith('{') else ''
+            if namespace.endswith('/pdfua/ns/id/') and (element.text or '').strip():
+                return 'pdf/ua'
+    if has_text('ISO_PDFEVersion'):
+        return 'pdf/e'
+    if has_text('GTS_PDFXVersion'):
+        return 'pdf/x'
+    return 'pdf'
+
+
+def detect_p7m_content_type(file_path: Path) -> str | None:
+    """
+    Detect the media type of the content embedded inside a PKCS#7/CMS container.
+
+    Extracts the encapsulated content, writes it to a temporary file, and
+    uses libmagic for content-based MIME detection.
+
+    Args:
+        file_path: Path to the .p7m file
+
+    Returns:
+        A lowercase extension string (e.g. "pdf", "xml") or None if
+        detection fails.
+    """
+    import tempfile
+    from converters.pkcs7_convert import PKCS7Converter
+
+    try:
+        raw = file_path.read_bytes()
+        content = PKCS7Converter._extract_content(raw)
+        content = PKCS7Converter._extract_recursive(content)
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            mime = magic.from_file(tmp_path, mime=True)
+            ext = mimetypes.guess_extension(mime) or ""
+            detected = ext.lstrip('.').lower()
+            return detected or None
+        finally:
+            os.unlink(tmp_path)
+    except Exception:
+        return None
+
+
+def detect_media_type(file_path: Path) -> str:
+    """
+    Detect the media type of a file based on its extension.
+
+    Falls back to libmagic content-based detection when the file has no
+    extension, then maps the resulting MIME type back to an extension string.
+
+    For PKCS#7 containers (.p7m), peeks inside to detect the embedded
+    content type and returns a compound type like ``p7m/pdf``.
+
+    Args:
+        file_path: Path to the file whose media type should be detected
+
+    Returns:
+        A lowercase extension string without a leading dot (e.g. "png", "pdf")
+    """
+    # Use extensions as the media_type
+    filename = file_path.name
+    extension = get_file_extension(filename)
+    if extension == 'pdf':
+        # PDF subtypes share the .pdf extension, so inspect the document
+        # before consulting the extension-to-media-type table.
+        return detect_pdf_type(file_path)
+
+    for media_type, mapped_extension in media_type_extensions.items():
+        if extension == mapped_extension:
+            return media_type
+    if extension == 'p7m':
+        inner_type = detect_p7m_content_type(file_path)
+        media_type = f"p7m/{inner_type}" if inner_type else "p7m"
+    elif not extension:
+        # If no extension, try to detect using magic
+        media_type = magic.from_file(str(file_path), mime=True)
+        extension = mimetypes.guess_extension(media_type) or ""
+        media_type = extension.lstrip('.').lower()
+    else:
+        media_type = extension.lstrip('.').lower()
+    return media_type
+
+def sanitize_extension(extension: str) -> str:
+    """
+    Sanitize a file extension string for safe storage and comparison.
+
+    Strips surrounding whitespace and a leading dot, removes characters that
+    are not alphanumeric, underscore, hyphen, or dot, and normalizes to
+    lowercase.
+
+    Args:
+        extension: The raw extension string to sanitize (may include a
+            leading dot)
+
+    Returns:
+        A cleaned, lowercase extension string without a leading dot
+    """
+    # Keep alphanumerics plus _, -, and ., normalize case.
+    cleaned = extension.strip().lstrip(".")
+    return "".join(ch for ch in cleaned if ch.isalnum() or ch in {"_", "-", ".", "/"}).lower()
+
+def get_file_extension(filename: str) -> str:
+    """
+    Extract and sanitize the file extension from a filename.
+
+    Args:
+        filename: The filename to extract the extension from
+    Returns:
+        A sanitized extension string without a leading dot, or an empty string if no extension is found
+    """
+    # Should return only
+    allowed_concatenated_extensions = {
+        '.tar.gz',
+        '.tar.bz2',
+        '.tar.xz',
+        '.tar.zst',
+        '.kepub.epub',
+    }
+    lower_filename = filename.lower()
+    for ext in allowed_concatenated_extensions:
+        if lower_filename.endswith(ext):
+            return sanitize_extension(ext.lstrip("."))
+    
+    return sanitize_extension(Path(lower_filename).suffix.lower())
+
+
+def validate_hexadecimal_filename(filename: str) -> bool:
+    """
+    Validate that a filename (without extension) is hexadecimal.
+    This is used to ensure files follow the UUID naming pattern.
+    
+    Args:
+        filename: The filename to validate (can include extension)
+        
+    Returns:
+        True if the filename stem is valid hexadecimal, False otherwise
+    """
+    # Get filename without extension
+    path = Path(filename)
+    extension = get_file_extension(filename)
+    stem = path.stem if not extension else path.stem[:-len(extension)]
+    
+    # Check if stem is non-empty and contains only hex characters
+    if not stem:
+        return False
+    
+    # Validate hexadecimal (UUIDs are hex with optional hyphens)
+    # Allow both "abc123" and "abc-123-def" formats
+    hex_pattern = re.compile(r'^[0-9a-fA-F-]+$')
+    return bool(hex_pattern.match(stem))
+
+
+def validate_safe_path(file_path: str | Path, raise_exception: bool = True) -> bool:
+    """
+    Validate that a file path is safe and within allowed directories.
+    
+    Security checks:
+    - Resolves path to absolute canonical form
+    - Ensures path is within allowed directories (data/uploads, data/tmp, data/outputs)
+    - Validates filename is hexadecimal (UUID pattern)
+    - Prevents path traversal attacks
+    
+    Args:
+        file_path: The file path to validate
+        raise_exception: If True, raise HTTPException on validation failure
+        
+    Returns:
+        True if path is safe, False otherwise
+        
+    Raises:
+        HTTPException: If raise_exception is True and validation fails
+    """
+    settings = get_settings()
+    
+    # Convert to Path object and resolve to absolute canonical path
+    # This automatically handles .., symlinks, etc.
+    try:
+        absolute_path = Path(file_path).resolve(strict=False)
+    except (ValueError, RuntimeError) as e:
+        if raise_exception:
+            raise HTTPException(status_code=400, detail=f"Invalid file path: {e}")
+        return False
+    
+    # Define allowed directories
+    allowed_dirs = [
+        settings.upload_dir.resolve(),
+        settings.tmp_dir.resolve(),
+        settings.output_dir.resolve()
+    ]
+    
+    # Check if path is within any allowed directory
+    is_within_allowed = any(
+        str(absolute_path).startswith(str(allowed_dir)) 
+        for allowed_dir in allowed_dirs
+    )
+    
+    if not is_within_allowed:
+        if raise_exception:
+            raise HTTPException(
+                status_code=403, 
+                detail="Access denied: File path is outside allowed directories"
+            )
+        return False
+    
+    # Validate filename is hexadecimal
+    if not validate_hexadecimal_filename(absolute_path.name):
+        if raise_exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid filename: Must be hexadecimal (UUID format) with optional extension"
+            )
+        return False
+    
+    return True
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent security issues like directory traversal.
+    
+    This implementation:
+    - Removes all path separators (/, \\)
+    - Strips control characters and null bytes
+    - Removes leading/trailing dots and spaces
+    - Prevents reserved Windows filenames
+    - Uses a whitelist approach for allowed characters
+    - Limits filename length
+    """
+    if not filename:
+        return "unnamed"
+    
+    # Remove any path separators and null bytes
+    cleaned = filename.replace("/", "").replace("\\", "").replace("\0", "")
+    
+    # Remove control characters (ASCII 0-31 and 127)
+    cleaned = "".join(ch for ch in cleaned if ord(ch) >= 32 and ord(ch) != 127)
+    
+    # Whitelist: only alphanumerics, underscore, hyphen, period, and space
+    cleaned = "".join(ch for ch in cleaned if ch.isalnum() or ch in {"_", "-", ".", " "})
+    
+    # Strip leading/trailing dots, spaces, and whitespace
+    cleaned = cleaned.strip(". ")
+    
+    # Check for Windows reserved names (case-insensitive)
+    reserved_names = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    }
+    name_without_ext = cleaned.split(".")[0].upper()
+    if name_without_ext in reserved_names:
+        cleaned = f"_{cleaned}"
+    
+    # Limit length (255 is typical max for most filesystems, use 200 to be safe)
+    if len(cleaned) > 200:
+        # Try to preserve extension
+        parts = cleaned.rsplit(".", 1)
+        if len(parts) == 2:
+            name, ext = parts
+            max_name_len = 200 - len(ext) - 1
+            cleaned = f"{name[:max_name_len]}.{ext}"
+        else:
+            cleaned = cleaned[:200]
+    
+    # If we ended up with nothing, use a default
+    if not cleaned:
+        return "unnamed"
+    
+    return cleaned
+
+def delete_file_and_metadata(file_id: str, file_db: "FileDB", raise_if_not_found: bool = False):
+    """
+    Delete a file from disk and remove its metadata from the database.
+
+    Looks up the file's metadata by ID, validates that the storage path is
+    within an allowed directory, unlinks the file, and then deletes the
+    metadata record.
+
+    Args:
+        file_id: Unique identifier of the file to delete
+        file_db: Database instance used to look up and delete file metadata
+        raise_if_not_found: If True, raise an HTTPException when the file ID
+            does not exist; if False, return silently
+
+    Raises:
+        HTTPException: If the file is not found (when raise_if_not_found is
+            True) or if the storage path fails validation
+    """
+    metadata = file_db.get_file_metadata(file_id)
+    if metadata is None:
+        if raise_if_not_found:
+            raise HTTPException(status_code=404, detail="File not found")
+        else:
+            return
+    
+    # Validate the storage path before deleting
+    storage_path = metadata['storage_path']
+    validate_safe_path(storage_path, raise_exception=True)
+    
+    os.unlink(storage_path)
+    file_db.delete_file_metadata(file_id)
