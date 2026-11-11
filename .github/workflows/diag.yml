@@ -1,0 +1,53 @@
+name: Diagnose production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+    steps:
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Inspect PHP and tools
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" bash -s <<'EOF'
+          set +e
+          echo "== whoami =="; id
+          echo "== os =="; cat /etc/os-release | head -n 4
+          echo "== php =="; php -v | head -n 1
+          echo "== php binary =="; php -r 'echo PHP_BINARY, PHP_EOL, PHP_BINDIR, PHP_EOL;'
+          echo "== php extensions =="; php -m | tr '\n' ' '; echo
+          echo "== php functions =="
+          php -r 'var_dump(["exec" => function_exists("exec"), "proc_open" => function_exists("proc_open"), "gd" => function_exists("imagecreatetruecolor"), "imagick" => class_exists("Imagick")]);'
+          echo "== disable_functions =="; php -r 'echo ini_get("disable_functions"), PHP_EOL;'
+          echo "== limits =="; php -r 'echo "upload_max_filesize=", ini_get("upload_max_filesize"), " post_max_size=", ini_get("post_max_size"), " memory_limit=", ini_get("memory_limit"), PHP_EOL;'
+          echo "== tools =="
+          for b in ffmpeg ffprobe soffice libreoffice gs pdftoppm pdftotext pandoc tesseract ebook-convert; do
+            printf '%-14s ' "$b"; command -v "$b" || echo MISSING
+          done
+          echo "== paths =="
+          ls -l /usr/bin/ffmpeg /usr/bin/soffice /usr/bin/gs /usr/bin/pdftoppm /usr/bin/tesseract 2>/dev/null
+          echo "== sudo =="
+          sudo -n true 2>/dev/null && echo SUDO_OK || echo NO_SUDO
+          echo "== disk =="; df -h "$DEPLOY_PATH" 2>/dev/null || df -h /
+          echo "== deploy dir =="; ls -ld "$DEPLOY_PATH"
+          echo "== done =="
+          EOF
