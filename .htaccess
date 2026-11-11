@@ -6,22 +6,14 @@ DirectoryIndex index.php
 
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
-    # The converter tab frames the same-origin Python service. GC pages keep
-    # their stricter CSP frame-ancestors 'none' from bootstrap.php.
-    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Frame-Options "DENY"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
 </IfModule>
 
-<FilesMatch "^(schema\.sql|README\.md|CLAUDE\.md|.*\.ini|db\.php|session\.php|bootstrap\.php|layout\.php|converter_lib\.php)$">
+<FilesMatch "^(schema\.sql|README\.md|CLAUDE\.md|.*\.ini|db\.php|session\.php|bootstrap\.php|layout\.php|converter_lib\.php|converter_engine\.php|converter_worker\.php)$">
     Require all denied
 </FilesMatch>
-
-# Converter service: /convert/* is served by the authenticated PHP proxy.
-<IfModule mod_rewrite.c>
-    RewriteEngine On
-    RewriteRule ^convert(?:/(.*))?$ converter_proxy.php [L,QSA]
-</IfModule>
 
 RedirectMatch 404 "(?i)/(?:uploads|updates|docs|\.claude|\.githooks)(?:/|$)"
 
