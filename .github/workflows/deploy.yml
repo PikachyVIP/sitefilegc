@@ -115,6 +115,21 @@ jobs:
           '
           EOF
 
+      - name: Verify converter under Apache
+        if: env.DEPLOY_URL != ''
+        run: |
+          host=$(printf '%s' "$DEPLOY_URL" | sed -E 's#^https?://##; s#/.*$##')
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "HOST='$host' bash -s" <<'EOF'
+          set -eu
+          body=$(curl -sSk -H "Host: $HOST" 'https://127.0.0.1/converter_api.php?action=selftest')
+          echo "$body"
+          case "$body" in
+            *'"ok":true'*) ;;
+            *) echo "converter selftest failed" >&2; exit 1 ;;
+          esac
+          EOF
+
       - name: Health check
         if: env.DEPLOY_URL != ''
         run: |

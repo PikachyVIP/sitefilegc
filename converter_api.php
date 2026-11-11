@@ -66,6 +66,21 @@ if (($_GET['action'] ?? '') === 'health') {
     ]);
 }
 
+if (($_GET['action'] ?? '') === 'selftest'
+    && in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true)) {
+    $out = sys_get_temp_dir() . '/gc-selftest-' . bin2hex(random_bytes(4)) . '.webp';
+    $log = $out . '.log';
+    try {
+        gc_conv_do_image(__DIR__ . '/assets/img/logo.png', 'png', $out, 'webp', 'medium', $log);
+        gc_api_out(['ok' => true, 'webp_bytes' => (int) filesize($out)]);
+    } catch (Throwable $e) {
+        gc_api_out(['ok' => false, 'error' => $e->getMessage()], 500);
+    } finally {
+        @unlink($out);
+        @unlink($log);
+    }
+}
+
 $user = gc_user();
 if ($user === null) {
     gc_api_fail('Требуется вход.', 401);
