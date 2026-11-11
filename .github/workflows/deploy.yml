@@ -121,7 +121,10 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
             "$SSH_USER@$SSH_HOST" "HOST='$host' bash -s" <<'EOF'
           set -eu
-          body=$(curl -sSk -H "Host: $HOST" 'https://127.0.0.1/converter_api.php?action=selftest')
+          resp=$(curl -sSk -w '\n%{http_code}' --resolve "$HOST:443:127.0.0.1" "https://$HOST/converter_api.php?action=selftest")
+          body=${resp%$'\n'*}
+          code=${resp##*$'\n'}
+          echo "http=$code"
           echo "$body"
           case "$body" in
             *'"ok":true'*) ;;
