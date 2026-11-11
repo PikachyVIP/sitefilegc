@@ -42,6 +42,25 @@ function gc_api_job(int $userId, string $id): array
     return [$dir, $job];
 }
 
+if (($_GET['action'] ?? '') === 'health') {
+    $tools = gc_conv_tools();
+    $catalog = gc_conv_catalog();
+    $formats = 0;
+    $groups = [];
+    foreach ($catalog as $key => $group) {
+        $count = count($group['outputs']);
+        $formats += $count;
+        $groups[$key] = $count;
+    }
+    gc_api_out([
+        'ok' => $formats > 0,
+        'formats' => $formats,
+        'groups' => $groups,
+        'gd' => function_exists('imagecreatetruecolor'),
+        'ffmpeg' => $tools['ffmpeg'] !== null,
+    ]);
+}
+
 $user = gc_user();
 if ($user === null) {
     gc_api_fail('Требуется вход.', 401);
