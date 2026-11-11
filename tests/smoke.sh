@@ -29,7 +29,10 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" \
 
 # 3. The main storage page renders for the authenticated user.
 body="$(curl -fsS -b "$jar" "$base/storage.php")"
-printf '%s' "$body" | grep -q 'gc_drive' || fail "storage page did not render"
+case "$body" in
+    *gc_drive*) ;;
+    *) fail "storage page did not render" ;;
+esac
 
 # 4. The legacy files page still works and sends the hardened headers.
 headers="$(mktemp)"
@@ -44,7 +47,10 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' "$base/storage.php")"
 
 # 6. The public release API returns valid JSON.
 api="$(curl -fsS "$base/update_api.php")"
-printf '%s' "$api" | grep -q '"ok":true' || fail "update_api.php did not return ok"
+case "$api" in
+    *'"ok":true'*) ;;
+    *) fail "update_api.php did not return ok" ;;
+esac
 
 # 7. The admin upload-log page is reachable for a user with view_logs.
 status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" "$base/upload_logs.php")"
@@ -52,6 +58,9 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" "$base/upload_logs.p
 
 # 8. The media hosting page renders for an authenticated user.
 body="$(curl -fsS -b "$jar" "$base/hosting.php")"
-printf '%s' "$body" | grep -q 'gc_hosting' || fail "hosting page did not render"
+case "$body" in
+    *gc_hosting*) ;;
+    *) fail "hosting page did not render" ;;
+esac
 
 echo "smoke: ok"
