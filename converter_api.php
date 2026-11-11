@@ -58,6 +58,11 @@ if (($_GET['action'] ?? '') === 'health') {
         'groups' => $groups,
         'gd' => function_exists('imagecreatetruecolor'),
         'ffmpeg' => $tools['ffmpeg'] !== null,
+        'exec' => function_exists('exec'),
+        'proc_open' => function_exists('proc_open'),
+        'max_upload' => gc_conv_max_upload(),
+        'upload_max_filesize' => ini_get('upload_max_filesize'),
+        'post_max_size' => ini_get('post_max_size'),
     ]);
 }
 
