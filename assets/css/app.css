@@ -3391,3 +3391,42 @@ dialog.gc_preview_modal { width: min(980px, calc(100vw - 24px)); }
 @media (max-width: 400px) {
     .gc_curtain_link { width: 43px; }
 }
+
+/* ---------------------------------------------------------------- converter */
+.gc_conv_head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 18px;
+}
+
+.gc_conv_head .gc_h1 { margin: 4px 0 8px; }
+
+.gc_conv_lead {
+    margin: 0;
+    max-width: 72ch;
+    color: var(--gc_text-dim);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.gc_panel.gc_conv_panel {
+    padding: 0;
+    overflow: hidden;
+    background: var(--gc_surface-1);
+}
+
+.gc_conv_frame {
+    display: block;
+    width: 100%;
+    height: calc(100vh - 252px);
+    min-height: 620px;
+    border: 0;
+    background: transparent;
+}
+
+@media (max-width: 900px) {
+    .gc_conv_head { display: block; }
+    .gc_conv_frame { height: calc(100vh - 230px); min-height: 520px; }
+}

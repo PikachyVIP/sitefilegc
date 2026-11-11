@@ -78,6 +78,7 @@ function gc_curtain(string $active = ''): void
         ['info.php', 'info', 'info', 'Инфо', 'О проекте и приложении'],
         ['apps.php', 'apps', 'grid', 'Приложения', 'Обновления приложений команды'],
         ['storage.php', 'storage', 'folder', 'Хранилище', 'Основное хранилище'],
+        ['converter.php', 'converter', 'sweep', 'Конвертер', 'Конвертация файлов'],
         ['transfer.php', 'transfer', 'swap', 'Трансфер', 'Временный трансфер'],
         ['hosting.php', 'hosting', 'hosting', 'Хостинг', 'Фото и видео по ссылке'],
         ['profile.php', 'profile', 'user', 'Профиль', 'Профиль и доступы'],

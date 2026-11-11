@@ -246,6 +246,7 @@ hr {
 .gc_ico--folder { --gc_ico: url('../img/icons/icon_folder.svg'); }
 .gc_ico--file { --gc_ico: url('../img/icons/icon_file.svg'); }
 .gc_ico--swap { --gc_ico: url('../img/icons/icon_swap.svg'); }
+.gc_ico--sweep { --gc_ico: url('../img/icons/icon_sweep.svg'); }
 .gc_ico--user { --gc_ico: url('../img/icons/icon_user.svg'); }
 .gc_ico--gear { --gc_ico: url('../img/icons/icon_gear.svg'); }
 .gc_ico--logout { --gc_ico: url('../img/icons/icon_logout.svg'); }
