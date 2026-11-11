@@ -118,19 +118,24 @@ jobs:
       - name: Verify converter under Apache
         run: |
           host=file.grandeconfidence.ru
+          token=$(openssl rand -hex 16)
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
-            "$SSH_USER@$SSH_HOST" "HOST='$host' bash -s" <<'EOF'
-          set -eu
-          resp=$(curl -sSk -w '\n%{http_code}' --resolve "$HOST:443:127.0.0.1" "https://$HOST/converter_api.php?action=selftest")
-          body=${resp%$'\n'*}
-          code=${resp##*$'\n'}
-          echo "http=$code"
+            "$SSH_USER@$SSH_HOST" "cd '$DEPLOY_PATH' && mkdir -p uploads/.converter && printf '%s' '$token' > uploads/.converter/selftest && chmod 644 uploads/.converter/selftest"
+          set +e
+          body=$(curl -sSk "https://$host/converter_api.php?action=selftest&token=$token")
+          rc=$?
+          set -e
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "rm -f '$DEPLOY_PATH/uploads/.converter/selftest'"
           echo "$body"
+          if [ "$rc" -ne 0 ]; then
+            echo "converter selftest request failed (curl $rc)" >&2
+            exit 1
+          fi
           case "$body" in
             *'"ok":true'*) ;;
             *) echo "converter selftest failed" >&2; exit 1 ;;
           esac
-          EOF
 
       - name: Health check
         run: |

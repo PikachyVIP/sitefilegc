@@ -66,8 +66,15 @@ if (($_GET['action'] ?? '') === 'health') {
     ]);
 }
 
-if (($_GET['action'] ?? '') === 'selftest'
-    && in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true)) {
+if (($_GET['action'] ?? '') === 'selftest') {
+    $tokenFile = __DIR__ . '/uploads/.converter/selftest';
+    $local = in_array((string) ($_SERVER['REMOTE_ADDR'] ?? ''), ['127.0.0.1', '::1'], true);
+    $tokenOk = is_file($tokenFile)
+        && isset($_GET['token'])
+        && hash_equals(trim((string) file_get_contents($tokenFile)), (string) $_GET['token']);
+    if (!$local && !$tokenOk) {
+        gc_api_fail('Доступ запрещён.', 403);
+    }
     $out = sys_get_temp_dir() . '/gc-selftest-' . bin2hex(random_bytes(4)) . '.webp';
     $log = $out . '.log';
     try {
