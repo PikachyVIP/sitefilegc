@@ -116,9 +116,8 @@ jobs:
           EOF
 
       - name: Verify converter under Apache
-        if: env.DEPLOY_URL != ''
         run: |
-          host=$(printf '%s' "$DEPLOY_URL" | sed -E 's#^https?://##; s#/.*$##')
+          host=file.grandeconfidence.ru
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes \
             "$SSH_USER@$SSH_HOST" "HOST='$host' bash -s" <<'EOF'
           set -eu
@@ -131,6 +130,5 @@ jobs:
           EOF
 
       - name: Health check
-        if: env.DEPLOY_URL != ''
         run: |
-          curl -fsS --retry 5 --retry-delay 3 "$DEPLOY_URL/login.php" > /dev/null
+          curl -fsS --retry 5 --retry-delay 3 "https://file.grandeconfidence.ru/login.php" > /dev/null
